@@ -297,7 +297,7 @@ test('usage endpoint: logged-out provider answers an error result', async () => 
 
 test('usage endpoint: payload validation rejects unknown providers', async () => {
   const handler = await mount()
-  const result = await handler('usage', { provider: 'gemini' }, new AbortController().signal)
+  const result = await handler('usage', { provider: 'foo' }, new AbortController().signal)
   assert.equal(result.ok, false)
   if (!result.ok) assert.equal(result.error.code, 'bad-request')
 })

@@ -1,9 +1,10 @@
 /**
  * dsh-plugin-subscriptions: register OAuth-subscription LLM providers
- * (ChatGPT/Codex, Claude, Grok) on `ctx.llm`, and expose the `/subscriptions-auth`
- * RPC channel the web Settings page uses to run the logins. The token store
- * lives at `~/.dsh/plugins/subscriptions/auth.json`; the channel registers only when
- * a host `connection` service exists, so headless compositions load fine.
+ * (ChatGPT/Codex, Claude, Grok, Gemini) on `ctx.llm`, and expose the
+ * `/subscriptions-auth` RPC channel the web Settings page uses to run the
+ * logins. The token store lives at `~/.dsh/plugins/subscriptions/auth.json`;
+ * the channel registers only when a host `connection` service exists, so
+ * headless compositions load fine.
  * @module dsh-plugin-subscriptions
  */
 
@@ -36,6 +37,7 @@ import {
 import type {
   ClaudeSession,
   CodexSession,
+  GeminiSession,
   GrokSession,
   ProviderId,
   SessionMap,
@@ -72,13 +74,22 @@ import {
   isGrokPermanentRefreshError,
   refreshGrok,
 } from './providers/grok.js'
+import {
+  GeminiAdapter,
+  geminiFlow,
+  GEMINI_PREEMPT_MS,
+  exchangeGeminiCode,
+  fetchGeminiUsage,
+  isGeminiPermanentRefreshError,
+  refreshGemini,
+} from './providers/gemini.js'
 import { createXSearchTool } from './tools/x-search.js'
 import { createImageGenerateTool } from './tools/image-generate.js'
 import { createVideoGenerateTool, videosDirectory } from './tools/video-generate.js'
 
 export type { ModelEntry, ProviderUsage, UsageWindow } from './providers/common.js'
 export type { ProviderStatus } from './auth/rpc.js'
-export type { ClaudeSession, CodexSession, GrokSession, ProviderId } from './auth/store.js'
+export type { ClaudeSession, CodexSession, GrokSession, GeminiSession, ProviderId } from './auth/store.js'
 
 export const name = 'dsh-plugin-subscriptions'
 export const inject = ['llm']
@@ -88,7 +99,7 @@ export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
 
 /** Plugin config, validated by the same-named schemastery schema. */
 export interface Config {
-  /** Provider routes to register; defaults to all three. */
+  /** Provider routes to register; defaults to all four. */
   providers?: ProviderId[]
   /** Maximum provider idle time while one stream read is outstanding (default five minutes). */
   streamIdleTimeoutMs?: number
@@ -97,10 +108,11 @@ export interface Config {
     codex?: ModelEntry[]
     claude?: ModelEntry[]
     grok?: ModelEntry[]
+    gemini?: ModelEntry[]
   }
 }
 
-const providerIdSchema = z.union(['codex', 'claude', 'grok'])
+const providerIdSchema = z.union(['codex', 'claude', 'grok', 'gemini'])
 const modelEntrySchema: z<ModelEntry> = z.object({
   id: z.string().required(),
   name: z.string(),
@@ -110,12 +122,13 @@ const modelEntrySchema: z<ModelEntry> = z.object({
 })
 
 export const Config: z<Config> = z.object({
-  providers: z.array(providerIdSchema).default(['codex', 'claude', 'grok']),
+  providers: z.array(providerIdSchema).default(['codex', 'claude', 'grok', 'gemini']),
   streamIdleTimeoutMs: z.number().min(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   models: z.object({
     codex: z.array(modelEntrySchema),
     claude: z.array(modelEntrySchema),
     grok: z.array(modelEntrySchema),
+    gemini: z.array(modelEntrySchema),
   }),
 })
 
@@ -137,6 +150,14 @@ const DEFAULT_MODELS: Record<ProviderId, ModelEntry[]> = {
     { id: 'grok-4-fast-reasoning', name: 'Grok 4 Fast Reasoning' },
     { id: 'grok-code-fast-1', name: 'Grok Code Fast 1' },
   ],
+  gemini: [
+    { id: 'gemini-3.7-flash', name: 'Gemini 3.7 Flash', maxTokens: 65_536, contextWindow: 1_048_576 },
+    { id: 'gemini-3.6-flash', name: 'Gemini 3.6 Flash', maxTokens: 65_536, contextWindow: 1_048_576 },
+    { id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash', maxTokens: 65_536, contextWindow: 1_048_576 },
+    { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro', maxTokens: 65_535, contextWindow: 1_048_576 },
+    { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash Lite', maxTokens: 65_535, contextWindow: 1_048_576 },
+    { id: 'gemini-3-flash', name: 'Gemini 3 Flash', maxTokens: 65_536, contextWindow: 1_048_576 },
+  ],
 }
 
 /** Validate and detach the model catalog for every provider. */
@@ -148,7 +169,7 @@ function resolveCatalog(models: Config['models']): Record<ProviderId, ModelEntry
     const entries = configured !== undefined && configured.length > 0 ? configured : DEFAULT_MODELS[provider]
     return validateModels(entries, `${name}: models.${provider}`)
   }
-  return { codex: resolve('codex'), claude: resolve('claude'), grok: resolve('grok') }
+  return { codex: resolve('codex'), claude: resolve('claude'), grok: resolve('grok'), gemini: resolve('gemini') }
 }
 
 /** The display account of a stored session, for the status endpoint. */
@@ -163,6 +184,7 @@ function accountOf(provider: ProviderId, session: StoredSession | undefined): st
     }
     case 'claude': return (session as ClaudeSession).emailAddress
     case 'grok': return (session as GrokSession).account
+    case 'gemini': return (session as GeminiSession).account
   }
 }
 
@@ -186,6 +208,8 @@ class SubscriptionsAuthController implements AuthController {
     private readonly resolveAttachments: () => AttachmentStore | undefined,
     /** Usage lookups for providers that expose a usage endpoint. */
     private readonly usageFetchers: UsageFetchers = {},
+    /** Warning sink so a background exchange failure also lands in the host log. */
+    private readonly onError: (provider: ProviderId, detail: string) => void = () => {},
   ) {}
 
   usage(provider: ProviderId, signal: AbortSignal): Promise<ProviderUsage> {
@@ -235,7 +259,9 @@ class SubscriptionsAuthController implements AuthController {
       }
       throw new Error('Claude Code credentials not found. Run "claude" first to log in.')
     }
-    const spec = provider === 'grok' ? await grokFlow() : codexFlow
+    const spec = provider === 'grok' ? await grokFlow()
+      : provider === 'gemini' ? geminiFlow
+      : codexFlow
     const attempt = await this.flows.start(provider, spec)
     void this.complete(provider, attempt)
     return { authorizeUrl: attempt.authorizeUrl }
@@ -252,7 +278,9 @@ class SubscriptionsAuthController implements AuthController {
     } catch (error) {
       // A user-cancelled attempt is not a failure worth surfacing.
       if (!(error instanceof Error && error.message === 'login cancelled')) {
-        this.lastError.set(provider, errorChain(error))
+        const detail = errorChain(error)
+        this.lastError.set(provider, detail)
+        this.onError(provider, detail)
       }
     }
   }
@@ -265,6 +293,8 @@ class SubscriptionsAuthController implements AuthController {
         return exchangeClaudeCode(code, attempt.pkce.verifier, attempt.redirectUri, attempt.state)
       case 'grok':
         return exchangeGrokCode(code, attempt.pkce.verifier, attempt.redirectUri, attempt.pkce.challenge)
+      case 'gemini':
+        return exchangeGeminiCode(code, attempt.redirectUri)
     }
   }
 
@@ -274,6 +304,7 @@ class SubscriptionsAuthController implements AuthController {
       case 'codex': return saveSession('codex', session as SessionMap['codex'] & object)
       case 'claude': return saveSession('claude', session as SessionMap['claude'] & object)
       case 'grok': return saveSession('grok', session as SessionMap['grok'] & object)
+      case 'gemini': return saveSession('gemini', session as SessionMap['gemini'] & object)
     }
   }
 
@@ -429,6 +460,31 @@ export function apply(ctx: Context, config: Config): void {
         })))
         break
       }
+      case 'gemini': {
+        const tokens = new TokenManager<GeminiSession>({
+          displayName: 'Gemini (Subscription)',
+          preemptMs: GEMINI_PREEMPT_MS,
+          load: () => getSession('gemini'),
+          save: session => saveSession('gemini', session),
+          remove: () => deleteSession('gemini'),
+          refresh: refreshGemini,
+          isPermanent: isGeminiPermanentRefreshError,
+          onRemoved: () => { authChanged('gemini') },
+        })
+        usageFetchers.gemini = async signal => fetchGeminiUsage(await tokens.session(), fetch, signal)
+        handles.set('gemini', ctx.llm.registerAdapter(['gemini'], new GeminiAdapter({
+          models: catalog.gemini,
+          streamIdleTimeoutMs,
+          tokens,
+          discovery: !overridden.has('gemini'),
+          onWarn,
+          resolveAttachments,
+          // Durable catalog: capability metadata survives restarts, so a
+          // resumed session's model keeps its discovered context window.
+          catalogStore: catalogStore('gemini'),
+        })))
+        break
+      }
     }
   }
 
@@ -444,7 +500,15 @@ export function apply(ctx: Context, config: Config): void {
       else speedBySession.set(sessionId, tier)
     },
   }
-  registerAuthRpc(ctx, new SubscriptionsAuthController(flows, authChanged, resolveAttachments, usageFetchers), speed)
+  registerAuthRpc(ctx, new SubscriptionsAuthController(
+    flows,
+    authChanged,
+    resolveAttachments,
+    usageFetchers,
+    (provider, detail) => {
+      ctx.logger.warn(`dsh-plugin-subscriptions: ${provider} login failed: ${detail}`)
+    },
+  ), speed)
 
   // Proactively keep the Claude session synced with Claude Code's own store
   // (Keychain/file) every 5 minutes, so a session left idle between requests

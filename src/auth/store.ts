@@ -12,10 +12,10 @@ import { dirname } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 
 /** Provider routes this plugin can serve. */
-export type ProviderId = 'codex' | 'claude' | 'grok'
+export type ProviderId = 'codex' | 'claude' | 'grok' | 'gemini'
 
 /** Every provider route, in display order. */
-export const PROVIDER_IDS: readonly ProviderId[] = ['codex', 'claude', 'grok']
+export const PROVIDER_IDS: readonly ProviderId[] = ['codex', 'claude', 'grok', 'gemini']
 
 /** Stored ChatGPT/Codex subscription session. */
 export interface CodexSession {
@@ -57,15 +57,31 @@ export interface GrokSession {
   account?: string
 }
 
+/** Stored Gemini (Google AI / Antigravity) subscription session. */
+export interface GeminiSession {
+  accessToken: string
+  refreshToken: string
+  /** Epoch milliseconds at which the access token expires. */
+  expiresAt: number
+  /**
+   * Cloud Code Assist project id the tokens are scoped to; every chat and
+   * usage request carries it (discovered/provisioned at login).
+   */
+  projectId: string
+  /** Display account: the Google account email from userinfo, when known. */
+  account?: string
+}
+
 /** The durable store shape: one optional session per provider. */
 export interface SessionMap {
   codex?: CodexSession
   claude?: ClaudeSession
   grok?: GrokSession
+  gemini?: GeminiSession
 }
 
 /** Any stored session, for provider-agnostic plumbing. */
-export type StoredSession = CodexSession | ClaudeSession | GrokSession
+export type StoredSession = CodexSession | ClaudeSession | GrokSession | GeminiSession
 
 /**
  * Absolute path of the auth store file.

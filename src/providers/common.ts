@@ -355,6 +355,8 @@ export interface DiscoveredModel {
   description?: string
   /** Advertised combined context capacity in tokens. */
   contextWindow?: number
+  /** Advertised per-request output cap, when the endpoint discloses one. */
+  maxTokens?: number
   /** Provider sort hint; lower sorts earlier. */
   priority?: number
   /** Advertised reasoning efforts, when the provider discloses them. */

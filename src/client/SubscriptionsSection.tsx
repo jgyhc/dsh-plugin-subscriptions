@@ -25,7 +25,7 @@ const SUBSCRIPTIONS_AUTH_CHANNEL = '/subscriptions-auth'
 const POLL_INTERVAL_MS = 2000
 
 /** Subscription provider ids, fixed by the node half's OAuth adapters. */
-export type SubscriptionProvider = 'codex' | 'claude' | 'grok'
+export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'gemini'
 
 /** One provider's login state as answered by the `status` endpoint. */
 export interface ProviderStatus {
@@ -80,6 +80,7 @@ const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [
   { id: 'codex', name: 'Codex (ChatGPT)' },
   { id: 'claude', name: 'Claude' },
   { id: 'grok', name: 'Grok (X Premium)' },
+  { id: 'gemini', name: 'Gemini (Google)' },
 ]
 
 /** Business error returned by the `/subscriptions-auth` channel (error branch message). */
@@ -162,10 +163,15 @@ const styles: Record<string, CSSProperties> = {
     color: 'var(--dsw-alias-label-secondary)', font: 'inherit', fontSize: 12, lineHeight: '18px',
     cursor: 'pointer',
   },
-  usageRow: { display: 'flex', flexDirection: 'column', gap: 3 },
+  usageRow: { display: 'flex', flexDirection: 'column', gap: 4, marginTop: 2 },
   usageMeta: {
     display: 'flex', justifyContent: 'space-between', gap: 8,
-    fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)',
+    fontSize: 12, lineHeight: '18px',
+  },
+  usageName: { fontWeight: 500, color: 'var(--dsw-alias-label-primary)' },
+  usagePercent: { fontWeight: 500, color: 'var(--dsw-alias-label-primary)' },
+  usageSubtitle: {
+    margin: 0, fontSize: 11, lineHeight: '16px', color: 'var(--dsw-alias-label-tertiary)',
   },
   usageTrack: {
     height: 6, borderRadius: 3, overflow: 'hidden',
@@ -210,17 +216,57 @@ function statusText(t: SubscriptionsSectionInjected['t'], status: ProviderStatus
   return t('notLoggedIn')
 }
 
+/** Format epoch ms into a localized duration remaining string. */
+function formatRelativeTime(t: SubscriptionsSectionInjected['t'], resetsAt: number): string {
+  const diffMs = resetsAt - Date.now()
+  if (diffMs <= 0) return t('timeLessThanMinute')
+  const diffMinutes = Math.round(diffMs / 60_000)
+  const diffHours = Math.floor(diffMinutes / 60)
+  const remMinutes = diffMinutes % 60
+  const diffDays = Math.floor(diffHours / 24)
+  const remHours = diffHours % 24
+
+  if (diffDays > 0) {
+    if (remHours > 0) return t('timeDaysHours', { days: diffDays, hours: remHours })
+    return t('timeDays', { days: diffDays })
+  }
+  if (diffHours > 0) {
+    if (remMinutes > 0) return t('timeHoursMinutes', { hours: diffHours, minutes: remMinutes })
+    return t('timeHours', { hours: diffHours })
+  }
+  if (diffMinutes > 0) return t('timeMinutes', { minutes: diffMinutes })
+  return t('timeLessThanMinute')
+}
+
+/** Localized descriptive subtitle under a usage window progress bar. */
+function usageSubtitle(t: SubscriptionsSectionInjected['t'], window: UsageWindow): string | undefined {
+  if (window.resetsAt === undefined) return undefined
+  const time = formatRelativeTime(t, window.resetsAt)
+  if (window.usedPercent > 0) {
+    if (window.kind === 'session') return t('usageUsedSubSession', { time })
+    if (window.kind === 'weekly') return t('usageUsedSubWeekly', { time })
+    return t('usageUsedSubGeneric', { time })
+  }
+  return t('usageUnusedSub', { time })
+}
+
 /**
  * Localized label of one usage window (kind, plus the model scope when named).
  * @param t - section translate.
  * @param window - the reported window.
- * @returns e.g. "5-hour window" or "Weekly · Opus".
+ * @returns e.g. "5-hour limit" or "Gemini Models · 5-hour limit".
  */
 function usageWindowLabel(t: SubscriptionsSectionInjected['t'], window: UsageWindow): string {
   const base = window.kind === 'session'
     ? t('usageSession')
     : window.kind === 'weekly' ? t('usageWeekly') : t('usageWindow')
-  return window.scope !== undefined && window.scope !== '' ? `${base} · ${window.scope}` : base
+  if (window.scope === 'Gemini Models') {
+    return `${t('geminiModelsScope')} · ${base}`
+  }
+  if (window.scope === 'Claude and GPT models') {
+    return `${t('claudeGptModelsScope')} · ${base}`
+  }
+  return window.scope !== undefined && window.scope !== '' ? `${window.scope} · ${base}` : base
 }
 
 /** Bar fill color: success normally, warn from 80%, error from 95%. */
@@ -241,7 +287,16 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [statuses, setStatuses] = useState<Partial<Record<SubscriptionProvider, ProviderStatus>>>({})
   const [errors, setErrors] = useState<Partial<Record<SubscriptionProvider, string>>>({})
   const [manualDrafts, setManualDrafts] = useState<Record<SubscriptionProvider, string>>({
-    codex: '', claude: '', grok: '',
+    codex: '', claude: '', grok: '', gemini: '',
+  })
+  /**
+   * Providers whose Log in was clicked on this page. Keeps the manual
+   * fallback (and Cancel) visible immediately on the first click and immune
+   * to a status poll racing the optimistic busy flag; cleared when the
+   * attempt settles.
+   */
+  const [loginActive, setLoginActive] = useState<Record<SubscriptionProvider, boolean>>({
+    codex: false, claude: false, grok: false, gemini: false,
   })
   const [usages, setUsages] = useState<Partial<Record<SubscriptionProvider, ProviderUsage>>>({})
   const [usageErrors, setUsageErrors] = useState<Partial<Record<SubscriptionProvider, string>>>({})
@@ -284,7 +339,12 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     setStatuses(response.providers)
     for (const { id } of PROVIDERS) {
       const status = response.providers[id]
-      if (status.loggedIn || !status.busy) stopPolling(id)
+      if (status.loggedIn || !status.busy) {
+        stopPolling(id)
+        // The attempt settled: drop the local login-active flag so the manual
+        // fallback collapses and the card returns to its idle buttons.
+        setLoginActive(prev => (prev[id] === true ? { ...prev, [id]: false } : prev))
+      }
     }
   }, [rpc, stopPolling])
 
@@ -375,6 +435,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       if (!mountedRef.current) return
       // Optimistic busy so Cancel and the manual fallback appear before the first poll tick.
       setStatuses(prev => ({ ...prev, [provider]: { ...prev[provider], busy: true, loggedIn: false } }))
+      // Local flag: the manual paste box must appear on this very click, even
+      // if a status poll overwrites the optimistic busy before the attempt is
+      // visible server-side.
+      setLoginActive(prev => ({ ...prev, [provider]: true }))
       startPolling(provider)
     } catch (error) {
       setProviderError(provider, messageOf(error))
@@ -384,6 +448,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const cancel = useCallback(async (provider: SubscriptionProvider): Promise<void> => {
     if (rpc === undefined) return
     stopPolling(provider)
+    setLoginActive(prev => ({ ...prev, [provider]: false }))
     try {
       await callSubscriptionsAuth<{ ok: true }>(rpc, 'cancel', { provider })
     } catch (error) {
@@ -428,6 +493,9 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       {PROVIDERS.map(({ id, name }) => {
         const status = statuses[id]
         const busy = status?.busy === true
+        // The manual fallback shows from the first Log in click and stays until
+        // the attempt settles, independent of the polled busy flag.
+        const manualVisible = busy || loginActive[id] === true
         const usage = usages[id]
         const usageError = usageErrors[id]
         // Providers without a usage endpoint answer supported:false — no block.
@@ -445,17 +513,17 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
             )}
             {errors[id] !== undefined && <p style={styles.errorLine}>{errors[id]}</p>}
             <div style={styles.actions}>
-              {!busy && status?.loggedIn !== true && (
+              {!manualVisible && status?.loggedIn !== true && (
                 <button type="button" style={styles.button} onClick={() => { void login(id) }}>
                   {t('login')}
                 </button>
               )}
-              {busy && (
+              {manualVisible && (
                 <button type="button" style={styles.button} onClick={() => { void cancel(id) }}>
                   {t('cancel')}
                 </button>
               )}
-              {status?.loggedIn === true && (
+              {status?.loggedIn === true && !manualVisible && (
                 <button type="button" style={styles.button} onClick={() => { void logout(id, name) }}>
                   {t('logout')}
                 </button>
@@ -488,26 +556,29 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 )}
                 {(usage?.windows ?? []).map((window, index) => {
                   const percent = Math.min(100, Math.max(0, window.usedPercent))
+                  const remaining = Math.round(100 - percent)
+                  const subtitle = usageSubtitle(t, window)
                   return (
                     <div key={index} style={styles.usageRow}>
                       <div style={styles.usageMeta}>
-                        <span>{usageWindowLabel(t, window)}</span>
-                        <span>
-                          {`${String(Math.round(percent))}%`}
-                          {window.resetsAt !== undefined
-                            && ` · ${t('usageResets', { date: new Date(window.resetsAt).toLocaleString() })}`}
+                        <span style={styles.usageName}>{usageWindowLabel(t, window)}</span>
+                        <span style={styles.usagePercent}>
+                          {t('usageRemaining', { remaining, used: Math.round(percent) })}
                         </span>
                       </div>
                       <div style={styles.usageTrack}>
                         <div style={{ ...styles.usageFill, width: `${String(percent)}%`, background: usageBarColor(percent) }} />
                       </div>
+                      {subtitle !== undefined && (
+                        <p style={styles.usageSubtitle}>{subtitle}</p>
+                      )}
                     </div>
                   )
                 })}
               </div>
             )}
-            {busy && (
-              <details style={styles.manual}>
+            {manualVisible && (
+              <details style={styles.manual} open={manualVisible}>
                 <summary>{t('manualSummary')}</summary>
                 <div style={styles.manualRow}>
                   <input
