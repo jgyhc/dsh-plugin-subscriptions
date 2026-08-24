@@ -319,6 +319,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [manualDrafts, setManualDrafts] = useState<Record<SubscriptionProvider, string>>({
     codex: '', claude: '', grok: '', gemini: '', cursor: '',
   })
+  /** Providers whose Submit is in flight (API key / callback paste). */
+  const [manualSubmitting, setManualSubmitting] = useState<Record<SubscriptionProvider, boolean>>({
+    codex: false, claude: false, grok: false, gemini: false, cursor: false,
+  })
   /**
    * Providers whose Log in was clicked on this page. Keeps the manual
    * fallback (and Cancel) visible immediately on the first click and immune
@@ -492,7 +496,14 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     if (rpc === undefined) return
     const input = manualDrafts[provider].trim()
     if (input === '') return
+    if (manualSubmitting[provider] === true) return
     setProviderError(provider, undefined)
+    setManualSubmitting(prev => ({ ...prev, [provider]: true }))
+    // Optimistic busy so the card shows "登录中…" while the exchange runs.
+    setStatuses(prev => ({
+      ...prev,
+      [provider]: { ...prev[provider], busy: true, loggedIn: prev[provider]?.loggedIn === true },
+    }))
     try {
       await callSubscriptionsAuth<{ ok: true }>(rpc, 'manual', { provider, input })
       if (mountedRef.current) {
@@ -502,9 +513,13 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       stopPolling(provider)
     } catch (error) {
       setProviderError(provider, messageOf(error))
+    } finally {
+      if (mountedRef.current) {
+        setManualSubmitting(prev => ({ ...prev, [provider]: false }))
+      }
     }
     await refresh()
-  }, [rpc, manualDrafts, setProviderError, refresh, stopPolling])
+  }, [rpc, manualDrafts, manualSubmitting, setProviderError, refresh, stopPolling])
 
   const logout = useCallback(async (provider: SubscriptionProvider, name: string): Promise<void> => {
     if (rpc === undefined) return
@@ -527,12 +542,13 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       <p style={styles.intro}>{t('intro')}</p>
       {PROVIDERS.map(({ id, name }) => {
         const status = statuses[id]
-        const busy = status?.busy === true
+        const busy = status?.busy === true || manualSubmitting[id] === true
         // The manual fallback shows from the first Log in click and stays until
         // the attempt settles, independent of the polled busy flag.
         // Cursor also allows pasting an API key while logged out (no browser).
         const manualVisible = busy || loginActive[id] === true
           || (id === 'cursor' && status?.loggedIn !== true)
+        const submitting = manualSubmitting[id] === true
         const usage = usages[id]
         const usageError = usageErrors[id]
         // Providers without a usage endpoint answer supported:false — no block.
@@ -619,13 +635,31 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 <summary>{id === 'cursor' ? t('cursorManualSummary') : t('manualSummary')}</summary>
                 <div style={styles.manualRow}>
                   <input
-                    style={styles.manualInput}
+                    style={{
+                      ...styles.manualInput,
+                      ...submitting ? { opacity: 0.6 } : {},
+                    }}
                     value={manualDrafts[id]}
                     placeholder={id === 'cursor' ? t('cursorManualPlaceholder') : t('manualPlaceholder')}
+                    disabled={submitting}
                     onChange={event => setManualDrafts(prev => ({ ...prev, [id]: event.target.value }))}
+                    onKeyDown={event => {
+                      if (event.key === 'Enter' && !submitting) {
+                        event.preventDefault()
+                        void submitManual(id)
+                      }
+                    }}
                   />
-                  <button type="button" style={styles.button} onClick={() => { void submitManual(id) }}>
-                    {t('submit')}
+                  <button
+                    type="button"
+                    style={{
+                      ...styles.button,
+                      ...submitting ? { opacity: 0.7, cursor: 'default' } : {},
+                    }}
+                    disabled={submitting || manualDrafts[id].trim() === ''}
+                    onClick={() => { void submitManual(id) }}
+                  >
+                    {submitting ? t('submitting') : t('submit')}
                   </button>
                 </div>
               </details>
