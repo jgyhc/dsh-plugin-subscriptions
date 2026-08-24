@@ -12,10 +12,10 @@ import { dirname } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 
 /** Provider routes this plugin can serve. */
-export type ProviderId = 'codex' | 'claude' | 'grok' | 'gemini'
+export type ProviderId = 'codex' | 'claude' | 'grok' | 'gemini' | 'cursor'
 
 /** Every provider route, in display order. */
-export const PROVIDER_IDS: readonly ProviderId[] = ['codex', 'claude', 'grok', 'gemini']
+export const PROVIDER_IDS: readonly ProviderId[] = ['codex', 'claude', 'grok', 'gemini', 'cursor']
 
 /** Stored ChatGPT/Codex subscription session. */
 export interface CodexSession {
@@ -72,16 +72,30 @@ export interface GeminiSession {
   account?: string
 }
 
+/**
+ * Stored Cursor subscription session (API key exchange or deep-control OAuth).
+ * Phase 1 stores credentials for Settings login/usage; chat streaming follows later.
+ */
+export interface CursorSession {
+  accessToken: string
+  refreshToken: string
+  /** Epoch milliseconds at which the access token should be refreshed. */
+  expiresAt: number
+  /** Account email from `cursor.com/api/auth/me`, when known. */
+  emailAddress?: string
+}
+
 /** The durable store shape: one optional session per provider. */
 export interface SessionMap {
   codex?: CodexSession
   claude?: ClaudeSession
   grok?: GrokSession
   gemini?: GeminiSession
+  cursor?: CursorSession
 }
 
 /** Any stored session, for provider-agnostic plumbing. */
-export type StoredSession = CodexSession | ClaudeSession | GrokSession | GeminiSession
+export type StoredSession = CodexSession | ClaudeSession | GrokSession | GeminiSession | CursorSession
 
 /**
  * Absolute path of the auth store file.

@@ -1,6 +1,6 @@
 /**
  * dsh-plugin-subscriptions: register OAuth-subscription LLM providers
- * (ChatGPT/Codex, Claude, Grok, Gemini) on `ctx.llm`, and expose the
+ * (ChatGPT/Codex, Claude, Grok, Gemini, Cursor) on `ctx.llm`, and expose the
  * `/subscriptions-auth` RPC channel the web Settings page uses to run the
  * logins. The token store lives at `~/.dsh/plugins/subscriptions/auth.json`;
  * the channel registers only when a host `connection` service exists, so
@@ -37,6 +37,7 @@ import {
 import type {
   ClaudeSession,
   CodexSession,
+  CursorSession,
   GeminiSession,
   GrokSession,
   ProviderId,
@@ -83,13 +84,22 @@ import {
   isGeminiPermanentRefreshError,
   refreshGemini,
 } from './providers/gemini.js'
+import {
+  CURSOR_PREEMPT_MS,
+  CursorLoginAttempt,
+  exchangeCursorApiKey,
+  fetchCursorUsage,
+  isCursorPermanentRefreshError,
+  refreshCursor,
+} from './providers/cursor.js'
+import { CursorAdapter } from './providers/cursor-adapter.js'
 import { createXSearchTool } from './tools/x-search.js'
 import { createImageGenerateTool } from './tools/image-generate.js'
 import { createVideoGenerateTool, videosDirectory } from './tools/video-generate.js'
 
 export type { ModelEntry, ProviderUsage, UsageWindow } from './providers/common.js'
 export type { ProviderStatus } from './auth/rpc.js'
-export type { ClaudeSession, CodexSession, GrokSession, GeminiSession, ProviderId } from './auth/store.js'
+export type { ClaudeSession, CodexSession, CursorSession, GrokSession, GeminiSession, ProviderId } from './auth/store.js'
 
 export const name = 'dsh-plugin-subscriptions'
 export const inject = ['llm']
@@ -109,10 +119,11 @@ export interface Config {
     claude?: ModelEntry[]
     grok?: ModelEntry[]
     gemini?: ModelEntry[]
+    cursor?: ModelEntry[]
   }
 }
 
-const providerIdSchema = z.union(['codex', 'claude', 'grok', 'gemini'])
+const providerIdSchema = z.union(['codex', 'claude', 'grok', 'gemini', 'cursor'])
 const modelEntrySchema: z<ModelEntry> = z.object({
   id: z.string().required(),
   name: z.string(),
@@ -122,13 +133,14 @@ const modelEntrySchema: z<ModelEntry> = z.object({
 })
 
 export const Config: z<Config> = z.object({
-  providers: z.array(providerIdSchema).default(['codex', 'claude', 'grok', 'gemini']),
+  providers: z.array(providerIdSchema).default(['codex', 'claude', 'grok', 'gemini', 'cursor']),
   streamIdleTimeoutMs: z.number().min(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   models: z.object({
     codex: z.array(modelEntrySchema),
     claude: z.array(modelEntrySchema),
     grok: z.array(modelEntrySchema),
     gemini: z.array(modelEntrySchema),
+    cursor: z.array(modelEntrySchema),
   }),
 })
 
@@ -158,6 +170,12 @@ const DEFAULT_MODELS: Record<ProviderId, ModelEntry[]> = {
     { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash Lite', maxTokens: 65_535, contextWindow: 1_048_576 },
     { id: 'gemini-3-flash', name: 'Gemini 3 Flash', maxTokens: 65_536, contextWindow: 1_048_576 },
   ],
+  // Cursor AgentService adapter (HTTP/2 Connect/protobuf).
+  cursor: [
+    { id: 'composer-2.5', name: 'Composer 2.5' },
+    { id: 'claude-4.6-opus-high', name: 'Claude 4.6 Opus High' },
+    { id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex' },
+  ],
 }
 
 /** Validate and detach the model catalog for every provider. */
@@ -169,7 +187,13 @@ function resolveCatalog(models: Config['models']): Record<ProviderId, ModelEntry
     const entries = configured !== undefined && configured.length > 0 ? configured : DEFAULT_MODELS[provider]
     return validateModels(entries, `${name}: models.${provider}`)
   }
-  return { codex: resolve('codex'), claude: resolve('claude'), grok: resolve('grok'), gemini: resolve('gemini') }
+  return {
+    codex: resolve('codex'),
+    claude: resolve('claude'),
+    grok: resolve('grok'),
+    gemini: resolve('gemini'),
+    cursor: resolve('cursor'),
+  }
 }
 
 /** The display account of a stored session, for the status endpoint. */
@@ -185,6 +209,7 @@ function accountOf(provider: ProviderId, session: StoredSession | undefined): st
     case 'claude': return (session as ClaudeSession).emailAddress
     case 'grok': return (session as GrokSession).account
     case 'gemini': return (session as GeminiSession).account
+    case 'cursor': return (session as CursorSession).emailAddress
   }
 }
 
@@ -199,6 +224,8 @@ type UsageFetchers = Partial<Record<ProviderId, (signal: AbortSignal) => Promise
 class SubscriptionsAuthController implements AuthController {
   /** Last login failure per provider, surfaced as `detail` until the next success. */
   private lastError = new Map<ProviderId, string>()
+  /** In-flight Cursor deep-control poll (at most one; not a loopback OAuth attempt). */
+  private cursorLogin: CursorLoginAttempt | undefined
 
   constructor(
     private readonly flows: OAuthFlowManager,
@@ -239,9 +266,12 @@ class SubscriptionsAuthController implements AuthController {
     const account = accountOf(provider, session)
     // The plan name is shown by the usage section, so `detail` only carries errors.
     const detail = this.lastError.get(provider)
+    const busy = provider === 'cursor'
+      ? this.cursorLogin?.busy === true
+      : this.flows.isBusy(provider)
     return {
       loggedIn: session !== undefined,
-      busy: this.flows.isBusy(provider),
+      busy,
       ...session === undefined ? {} : { expiresAt: session.expiresAt },
       ...account === undefined ? {} : { account },
       ...detail === undefined ? {} : { detail },
@@ -259,12 +289,41 @@ class SubscriptionsAuthController implements AuthController {
       }
       throw new Error('Claude Code credentials not found. Run "claude" first to log in.')
     }
+    if (provider === 'cursor') {
+      if (this.cursorLogin?.busy === true) {
+        throw new Error('a cursor login attempt is already in progress')
+      }
+      const attempt = new CursorLoginAttempt()
+      this.cursorLogin = attempt
+      void this.completeCursor(attempt)
+      return { authorizeUrl: attempt.loginUrl }
+    }
     const spec = provider === 'grok' ? await grokFlow()
       : provider === 'gemini' ? geminiFlow
       : codexFlow
     const attempt = await this.flows.start(provider, spec)
     void this.complete(provider, attempt)
     return { authorizeUrl: attempt.authorizeUrl }
+  }
+
+  /** Drive one Cursor deep-control poll to a stored session. */
+  private async completeCursor(attempt: CursorLoginAttempt): Promise<void> {
+    try {
+      const session = await attempt.wait()
+      await this.persist('cursor', session)
+      this.lastError.delete('cursor')
+      this.onAuthChanged('cursor')
+    } catch (error) {
+      const cancelled = error instanceof Error
+        && (error.message === 'login cancelled' || error.name === 'AbortError')
+      if (!cancelled) {
+        const detail = errorChain(error)
+        this.lastError.set('cursor', detail)
+        this.onError('cursor', detail)
+      }
+    } finally {
+      if (this.cursorLogin === attempt) this.cursorLogin = undefined
+    }
   }
 
   /** Drive one attempt to a stored session; records failures for the status endpoint. */
@@ -295,6 +354,8 @@ class SubscriptionsAuthController implements AuthController {
         return exchangeGrokCode(code, attempt.pkce.verifier, attempt.redirectUri, attempt.pkce.challenge)
       case 'gemini':
         return exchangeGeminiCode(code, attempt.redirectUri)
+      case 'cursor':
+        throw new Error('cursor login uses deep-control poll or API key paste, not an authorization code')
     }
   }
 
@@ -305,25 +366,45 @@ class SubscriptionsAuthController implements AuthController {
       case 'claude': return saveSession('claude', session as SessionMap['claude'] & object)
       case 'grok': return saveSession('grok', session as SessionMap['grok'] & object)
       case 'gemini': return saveSession('gemini', session as SessionMap['gemini'] & object)
+      case 'cursor': return saveSession('cursor', session as SessionMap['cursor'] & object)
     }
   }
 
-  manual(provider: ProviderId, input: string): Promise<void> {
+  async manual(provider: ProviderId, input: string): Promise<void> {
+    if (provider === 'cursor') {
+      // API key / refresh token paste — works with or without a pending poll.
+      const session = await exchangeCursorApiKey(input)
+      this.cursorLogin?.cancel()
+      this.cursorLogin = undefined
+      await this.persist('cursor', session)
+      this.lastError.delete('cursor')
+      this.onAuthChanged('cursor')
+      return
+    }
     const attempt = this.flows.pending(provider)
     if (attempt === undefined) {
-      return Promise.reject(new Error(`no ${provider} login attempt is in progress`))
+      throw new Error(`no ${provider} login attempt is in progress`)
     }
     attempt.manual(input)
-    return Promise.resolve()
   }
 
   cancel(provider: ProviderId): Promise<void> {
+    if (provider === 'cursor') {
+      this.cursorLogin?.cancel()
+      this.cursorLogin = undefined
+      return Promise.resolve()
+    }
     this.flows.pending(provider)?.cancel()
     return Promise.resolve()
   }
 
   async logout(provider: ProviderId): Promise<void> {
-    this.flows.pending(provider)?.cancel()
+    if (provider === 'cursor') {
+      this.cursorLogin?.cancel()
+      this.cursorLogin = undefined
+    } else {
+      this.flows.pending(provider)?.cancel()
+    }
     await deleteSession(provider)
     this.lastError.delete(provider)
     this.onAuthChanged(provider)
@@ -482,6 +563,29 @@ export function apply(ctx: Context, config: Config): void {
           // Durable catalog: capability metadata survives restarts, so a
           // resumed session's model keeps its discovered context window.
           catalogStore: catalogStore('gemini'),
+        })))
+        break
+      }
+      case 'cursor': {
+        const tokens = new TokenManager<CursorSession>({
+          displayName: 'Cursor (Subscription)',
+          preemptMs: CURSOR_PREEMPT_MS,
+          load: () => getSession('cursor'),
+          save: session => saveSession('cursor', session),
+          remove: () => deleteSession('cursor'),
+          refresh: refreshCursor,
+          isPermanent: isCursorPermanentRefreshError,
+          onRemoved: () => { authChanged('cursor') },
+        })
+        usageFetchers.cursor = async signal => fetchCursorUsage(await tokens.session(), fetch, signal)
+        handles.set('cursor', ctx.llm.registerAdapter(['cursor'], new CursorAdapter({
+          models: catalog.cursor,
+          streamIdleTimeoutMs,
+          tokens,
+          discovery: !overridden.has('cursor'),
+          onWarn,
+          resolveAttachments,
+          catalogStore: catalogStore('cursor'),
         })))
         break
       }

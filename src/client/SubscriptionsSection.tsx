@@ -25,7 +25,7 @@ const SUBSCRIPTIONS_AUTH_CHANNEL = '/subscriptions-auth'
 const POLL_INTERVAL_MS = 2000
 
 /** Subscription provider ids, fixed by the node half's OAuth adapters. */
-export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'gemini'
+export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'gemini' | 'cursor'
 
 /** One provider's login state as answered by the `status` endpoint. */
 export interface ProviderStatus {
@@ -36,9 +36,26 @@ export interface ProviderStatus {
   detail?: string
 }
 
+/** Default status when the node half has not registered a provider yet. */
+const OFFLINE_STATUS: ProviderStatus = { loggedIn: false, busy: false }
+
+/**
+ * Fill in missing provider entries so a newer client can talk to an older node
+ * half without throwing while the user restarts `dsh web`.
+ */
+function normalizeProviderStatuses(
+  providers: Partial<Record<SubscriptionProvider, ProviderStatus>> | undefined,
+): Record<SubscriptionProvider, ProviderStatus> {
+  const out = {} as Record<SubscriptionProvider, ProviderStatus>
+  for (const { id } of PROVIDERS) {
+    out[id] = providers?.[id] ?? OFFLINE_STATUS
+  }
+  return out
+}
+
 /** `status` endpoint value: the node half owns this shape. */
 interface StatusResponse {
-  providers: Record<SubscriptionProvider, ProviderStatus>
+  providers: Partial<Record<SubscriptionProvider, ProviderStatus>>
 }
 
 /** One rate-limit window as answered by the `usage` endpoint. */
@@ -81,6 +98,7 @@ const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [
   { id: 'claude', name: 'Claude' },
   { id: 'grok', name: 'Grok (X Premium)' },
   { id: 'gemini', name: 'Gemini (Google)' },
+  { id: 'cursor', name: 'Cursor' },
 ]
 
 /** Business error returned by the `/subscriptions-auth` channel (error branch message). */
@@ -266,6 +284,18 @@ function usageWindowLabel(t: SubscriptionsSectionInjected['t'], window: UsageWin
   if (window.scope === 'Claude and GPT models') {
     return `${t('claudeGptModelsScope')} · ${base}`
   }
+  if (window.scope === 'Cursor Models') {
+    return `${t('cursorModelsScope')} · ${base}`
+  }
+  if (window.scope === 'API Models') {
+    return `${t('cursorApiModelsScope')} · ${base}`
+  }
+  if (window.scope === 'Personal Usage') {
+    return `${t('cursorPersonalScope')} · ${base}`
+  }
+  if (window.scope === 'On-Demand Usage') {
+    return `${t('cursorOnDemandScope')} · ${base}`
+  }
   return window.scope !== undefined && window.scope !== '' ? `${window.scope} · ${base}` : base
 }
 
@@ -287,7 +317,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [statuses, setStatuses] = useState<Partial<Record<SubscriptionProvider, ProviderStatus>>>({})
   const [errors, setErrors] = useState<Partial<Record<SubscriptionProvider, string>>>({})
   const [manualDrafts, setManualDrafts] = useState<Record<SubscriptionProvider, string>>({
-    codex: '', claude: '', grok: '', gemini: '',
+    codex: '', claude: '', grok: '', gemini: '', cursor: '',
   })
   /**
    * Providers whose Log in was clicked on this page. Keeps the manual
@@ -296,7 +326,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
    * attempt settles.
    */
   const [loginActive, setLoginActive] = useState<Record<SubscriptionProvider, boolean>>({
-    codex: false, claude: false, grok: false, gemini: false,
+    codex: false, claude: false, grok: false, gemini: false, cursor: false,
   })
   const [usages, setUsages] = useState<Partial<Record<SubscriptionProvider, ProviderUsage>>>({})
   const [usageErrors, setUsageErrors] = useState<Partial<Record<SubscriptionProvider, string>>>({})
@@ -336,9 +366,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       return
     }
     if (!mountedRef.current) return
-    setStatuses(response.providers)
+    const normalized = normalizeProviderStatuses(response.providers)
+    setStatuses(normalized)
     for (const { id } of PROVIDERS) {
-      const status = response.providers[id]
+      const status = normalized[id]
       if (status.loggedIn || !status.busy) {
         stopPolling(id)
         // The attempt settled: drop the local login-active flag so the manual
@@ -464,12 +495,16 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     setProviderError(provider, undefined)
     try {
       await callSubscriptionsAuth<{ ok: true }>(rpc, 'manual', { provider, input })
-      if (mountedRef.current) setManualDrafts(prev => ({ ...prev, [provider]: '' }))
+      if (mountedRef.current) {
+        setManualDrafts(prev => ({ ...prev, [provider]: '' }))
+        setLoginActive(prev => ({ ...prev, [provider]: false }))
+      }
+      stopPolling(provider)
     } catch (error) {
       setProviderError(provider, messageOf(error))
     }
     await refresh()
-  }, [rpc, manualDrafts, setProviderError, refresh])
+  }, [rpc, manualDrafts, setProviderError, refresh, stopPolling])
 
   const logout = useCallback(async (provider: SubscriptionProvider, name: string): Promise<void> => {
     if (rpc === undefined) return
@@ -495,7 +530,9 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
         const busy = status?.busy === true
         // The manual fallback shows from the first Log in click and stays until
         // the attempt settles, independent of the polled busy flag.
+        // Cursor also allows pasting an API key while logged out (no browser).
         const manualVisible = busy || loginActive[id] === true
+          || (id === 'cursor' && status?.loggedIn !== true)
         const usage = usages[id]
         const usageError = usageErrors[id]
         // Providers without a usage endpoint answer supported:false — no block.
@@ -513,17 +550,17 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
             )}
             {errors[id] !== undefined && <p style={styles.errorLine}>{errors[id]}</p>}
             <div style={styles.actions}>
-              {!manualVisible && status?.loggedIn !== true && (
+              {!busy && loginActive[id] !== true && status?.loggedIn !== true && (
                 <button type="button" style={styles.button} onClick={() => { void login(id) }}>
                   {t('login')}
                 </button>
               )}
-              {manualVisible && (
+              {(busy || loginActive[id] === true) && (
                 <button type="button" style={styles.button} onClick={() => { void cancel(id) }}>
                   {t('cancel')}
                 </button>
               )}
-              {status?.loggedIn === true && !manualVisible && (
+              {status?.loggedIn === true && !busy && loginActive[id] !== true && (
                 <button type="button" style={styles.button} onClick={() => { void logout(id, name) }}>
                   {t('logout')}
                 </button>
@@ -579,12 +616,12 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
             )}
             {manualVisible && (
               <details style={styles.manual} open={manualVisible}>
-                <summary>{t('manualSummary')}</summary>
+                <summary>{id === 'cursor' ? t('cursorManualSummary') : t('manualSummary')}</summary>
                 <div style={styles.manualRow}>
                   <input
                     style={styles.manualInput}
                     value={manualDrafts[id]}
-                    placeholder={t('manualPlaceholder')}
+                    placeholder={id === 'cursor' ? t('cursorManualPlaceholder') : t('manualPlaceholder')}
                     onChange={event => setManualDrafts(prev => ({ ...prev, [id]: event.target.value }))}
                   />
                   <button type="button" style={styles.button} onClick={() => { void submitManual(id) }}>
