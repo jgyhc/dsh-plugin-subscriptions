@@ -535,6 +535,19 @@ test('GeminiAdapter discovery maps the live catalog; resolveModel prefers it', a
   assert.equal(fallback.defaultMaxTokens, 64_000)
 })
 
+test('GeminiAdapter exposes prepareCall for DSH 0.1.1 adapter contract', async () => {
+  const adapter = new GeminiAdapter({
+    models: STATIC_GEMINI,
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(geminiSession),
+    discovery: false,
+  })
+  assert.equal(typeof adapter.prepareCall, 'function')
+  const prepared = await adapter.prepareCall('gemini', 'gemini-3.7-flash')
+  assert.equal(prepared.model.id, 'gemini-3.7-flash')
+  assert.equal(typeof prepared.stream, 'function')
+})
+
 test('GeminiAdapter discovery failure falls back to the static catalog with a warning', async () => {
   const warnings: string[] = []
   const adapter = new GeminiAdapter({
