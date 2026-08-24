@@ -57,15 +57,51 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /**
- * Epoch ms at which we should refresh, derived from the JWT `exp` claim
- * (minus a five-minute preempt), or one hour from now when the token is opaque.
+ * Epoch ms of JWT `exp`, or one hour from now when the token is opaque.
+ * {@link TokenManager} applies {@link CURSOR_PREEMPT_MS} on top of this value.
  */
 export function cursorExpiresAt(accessToken: string): number {
   const payload = decodeJwtPayload(accessToken)
   if (typeof payload?.exp === 'number' && Number.isFinite(payload.exp)) {
-    return payload.exp * 1000 - CURSOR_PREEMPT_MS
+    return payload.exp * 1000
   }
   return Date.now() + 3_600_000
+}
+
+/**
+ * Whether a token is a short-lived Cursor access JWT (cannot re-exchange).
+ * Durable credentials are opaque API keys or non-access refresh tokens.
+ */
+function isCursorAccessStyleJwt(token: string): boolean {
+  const payload = decodeJwtPayload(token)
+  if (payload === undefined) return false
+  return payload.type === 'api_key_token' || payload.type === 'session'
+}
+
+/**
+ * Pick the durable refresh credential to persist.
+ * Cursor's exchange often echoes the access JWT as `refreshToken`; that JWT
+ * cannot call `exchange_user_api_key` again, so we keep the pasted API key.
+ */
+export function durableCursorRefreshToken(
+  exchangeInput: string,
+  accessToken: string,
+  returnedRefresh: string | undefined,
+): string {
+  const returned = typeof returnedRefresh === 'string' && returnedRefresh.length > 0
+    ? returnedRefresh
+    : undefined
+  if (
+    returned !== undefined
+    && returned !== accessToken
+    && !isCursorAccessStyleJwt(returned)
+  ) {
+    return returned
+  }
+  if (exchangeInput.length > 0 && exchangeInput !== accessToken && !isCursorAccessStyleJwt(exchangeInput)) {
+    return exchangeInput
+  }
+  return returned ?? exchangeInput
 }
 
 /**
@@ -233,9 +269,7 @@ export async function exchangeCursorApiKey(
   if (typeof data.accessToken !== 'string' || data.accessToken.length === 0) {
     throw new Error('cursor token exchange returned no access token')
   }
-  const refreshToken = typeof data.refreshToken === 'string' && data.refreshToken.length > 0
-    ? data.refreshToken
-    : trimmed
+  const refreshToken = durableCursorRefreshToken(trimmed, data.accessToken, data.refreshToken)
   return cursorSession(data.accessToken, refreshToken, fetchFn)
 }
 

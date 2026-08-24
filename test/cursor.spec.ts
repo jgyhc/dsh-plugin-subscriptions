@@ -30,6 +30,7 @@ import {
   generateCursorAuthParams,
   parseCursorUsage,
   pollCursorAuth,
+  durableCursorRefreshToken,
 } from '../src/providers/cursor.js'
 
 /** Build a compact unsigned-looking JWT with a JSON payload (signature unused). */
@@ -87,9 +88,7 @@ test('cursorUserId and cursorExpiresAt read JWT claims', () => {
   const exp = Math.floor(Date.now() / 1000) + 3600
   const token = fakeJwt({ sub: 'auth0|user_abc', exp })
   assert.equal(cursorUserId(token), 'user_abc')
-  const expiresAt = cursorExpiresAt(token)
-  assert.ok(expiresAt < exp * 1000)
-  assert.ok(expiresAt > Date.now())
+  assert.equal(cursorExpiresAt(token), exp * 1000)
 })
 
 test('exchangeCursorApiKey posts to exchange_user_api_key and builds a session', async () => {
@@ -123,6 +122,30 @@ test('exchangeCursorApiKey falls back to the pasted key as refresh token', async
   ])
   const session = await exchangeCursorApiKey('  pasted-key  ', fetchFn)
   assert.equal(session.refreshToken, 'pasted-key')
+})
+
+test('exchangeCursorApiKey keeps the API key when exchange echoes an access JWT', async () => {
+  const access = fakeJwt({
+    sub: 'auth0|u4',
+    exp: Math.floor(Date.now() / 1000) + 7200,
+    type: 'api_key_token',
+  })
+  const { fetchFn } = routedFetch([
+    {
+      match: url => url.startsWith(CURSOR_REFRESH_URL),
+      body: { accessToken: access, refreshToken: access },
+    },
+  ])
+  const session = await exchangeCursorApiKey('key_abc123', fetchFn)
+  assert.equal(session.accessToken, access)
+  assert.equal(session.refreshToken, 'key_abc123')
+})
+
+test('durableCursorRefreshToken prefers opaque keys over access JWTs', () => {
+  const access = fakeJwt({ sub: 'auth0|u5', exp: Math.floor(Date.now() / 1000) + 3600, type: 'api_key_token' })
+  assert.equal(durableCursorRefreshToken('key_x', access, access), 'key_x')
+  assert.equal(durableCursorRefreshToken('key_x', access, undefined), 'key_x')
+  assert.equal(durableCursorRefreshToken('key_x', access, 'rt-real'), 'rt-real')
 })
 
 test('pollCursorAuth returns tokens after a 404 then 200', async () => {
