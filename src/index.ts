@@ -10,9 +10,10 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { errorChain } from '@deepseek-ai/dsh-llm'
+import { CallId, errorChain } from '@deepseek-ai/dsh-llm'
 import type { AdapterRegistrationHandle } from '@deepseek-ai/dsh-llm'
 // Type-only: activates the `ctx.tools` Context merge for the inject block.
+import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-tools'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { OAuthFlowManager, type OAuthAttempt } from './auth/oauth-flow.js'
@@ -93,6 +94,7 @@ import {
   refreshCursor,
 } from './providers/cursor.js'
 import { CursorAdapter } from './providers/cursor-adapter.js'
+import type { ExecuteMcpTool, NativeToolOutcome } from './translate/cursor-native-exec.js'
 import { createXSearchTool } from './tools/x-search.js'
 import { createImageGenerateTool } from './tools/image-generate.js'
 import { createVideoGenerateTool, videosDirectory } from './tools/video-generate.js'
@@ -411,6 +413,42 @@ class SubscriptionsAuthController implements AuthController {
   }
 }
 
+/**
+ * Resolve the session's validated working directory from the harness session
+ * store, when the service is mounted. Native Cursor execs default to it so
+ * `pwd`/`ls`/bare greps land in the session workspace instead of the plugin
+ * process's directory.
+ */
+function sessionCwd(ctx: Context, sessionId: string | undefined): string | undefined {
+  if (sessionId === undefined) return undefined
+  const store = ctx.get('sessions') as { get(id: string): { header?: { cwd?: string } } | undefined } | undefined
+  const cwd = store?.get(sessionId)?.header?.cwd
+  return cwd !== undefined && cwd.length > 0 ? cwd : undefined
+}
+
+/**
+ * Run one Cursor MCP tool call through the harness tool registry. The call
+ * honors the same pre-execute/guard/dispatch pipeline as harness-driven tool
+ * calls (sandbox, approval, output caps); the flattened text content is what
+ * the Cursor agent sees in the `mcpResult`.
+ */
+async function runCursorMcpTool(
+  tools: ToolRuntime,
+  exec: { callId: string; name: string; arguments: Record<string, unknown>; signal: AbortSignal },
+): Promise<NativeToolOutcome> {
+  const result = await tools.execute({
+    callId: CallId(exec.callId),
+    name: exec.name,
+    arguments: exec.arguments,
+    signal: exec.signal,
+  })
+  const content = result.content
+    .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
+    .map(block => block.text)
+    .join('\n')
+  return { isError: result.isError, content }
+}
+
 export function apply(ctx: Context, config: Config): void {
   const providers = [...new Set(config.providers ?? [...PROVIDER_IDS])]
   const streamIdleTimeoutMs = config.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS
@@ -454,6 +492,11 @@ export function apply(ctx: Context, config: Config): void {
   // fast-tier support so a stale choice cannot leak onto a plain model.
   const speedBySession = new Map<string, SpeedTier>()
   let codexAdapter: CodexAdapter | undefined
+  // Cursor native exec: MCP tool calls are served by the harness tool registry
+  // once the `tools` service mounts (optional; headless compositions answer
+  // `toolNotFound` instead). The getter reads the live variable, so the
+  // adapter — constructed before `tools` mounts — still resolves it later.
+  let cursorExecuteMcpTool: ExecuteMcpTool | undefined
 
   for (const provider of providers) {
     switch (provider) {
@@ -586,6 +629,10 @@ export function apply(ctx: Context, config: Config): void {
           onWarn,
           resolveAttachments,
           catalogStore: catalogStore('cursor'),
+          executeMcpTool: () => cursorExecuteMcpTool,
+          // Native execs default their working directory to the session's
+          // validated cwd so tools run in the session workspace.
+          resolveSessionCwd: (sessionId: string | undefined) => sessionCwd(ctx, sessionId),
         })))
         break
       }
@@ -644,5 +691,8 @@ export function apply(ctx: Context, config: Config): void {
         resolveLlm: () => ctx.get('llm'),
       }))
     }
+    // Native Cursor MCP tool calls run through the same registry pipeline as
+    // harness-driven calls (sandbox, approval, output caps).
+    cursorExecuteMcpTool = exec => runCursorMcpTool(toolsCtx.tools, exec)
   })
 }

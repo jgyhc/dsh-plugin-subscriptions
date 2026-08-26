@@ -15,6 +15,7 @@ import type { CursorSession } from '../auth/store.js'
 import { resolveImages } from '../translate/resolved.js'
 import { fetchCursorModels } from '../translate/cursor-request.js'
 import { streamCursor } from '../translate/cursor-stream.js'
+import type { ExecuteMcpTool } from '../translate/cursor-native-exec.js'
 import {
   idleWatchdog,
   mapFetchFailure,
@@ -43,6 +44,18 @@ export interface CursorAdapterOptions {
   resolveAttachments?: () => AttachmentStore | undefined
   catalogStore?: CatalogPersistence
   baseUrl?: string
+  /**
+   * Resolves the harness tool executor used for native Cursor MCP tool calls,
+   * when the `tools` service is mounted. Resolved per stream.
+   */
+  executeMcpTool?: () => ExecuteMcpTool | undefined
+  /**
+   * Resolves the session's validated working directory (from the harness
+   * session store) so native Cursor execs default to the session workspace
+   * instead of the plugin process's cwd. Optional; falls back to the process
+   * cwd when unset or unresolved.
+   */
+  resolveSessionCwd?: (sessionId: string | undefined) => string | undefined
 }
 
 /** Cursor wire adapter: one instance serves the `cursor` provider route. */
@@ -148,6 +161,9 @@ export class CursorAdapter extends LlmAdapter {
     onActivity: () => void,
   ): AsyncIterable<StreamChunk> {
     const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), signal)
+    // Default native execs to the session's workspace directory so `pwd`,
+    // `ls`, and bare greps land in the session instead of the plugin process.
+    const cwd = this.options.resolveSessionCwd?.(options.sessionId)
     yield* streamCursor({
       model: options.model,
       messages,
@@ -159,6 +175,8 @@ export class CursorAdapter extends LlmAdapter {
       ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort }),
       ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
       ...(this.options.baseUrl === undefined ? {} : { baseUrl: this.options.baseUrl }),
+      ...(this.options.executeMcpTool === undefined ? {} : { executeMcpTool: this.options.executeMcpTool }),
+      ...(cwd === undefined ? {} : { cwd }),
     })
   }
 }

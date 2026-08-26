@@ -148,20 +148,28 @@ export function buildCursorRequestContextRules(systemPrompt: string | undefined)
   })
 }
 
-/** Advertise harness tools as MCP tools (native Cursor tools are omitted). */
+/**
+ * Advertise harness tools as MCP tools. Native Cursor tools (bash/read/write/
+ * delete/ls/grep/edit/todo) are omitted: the Cursor agent invokes those
+ * through its own exec messages, which the plugin executes natively and
+ * relays back on the Connect stream. Routing them through MCP instead would
+ * make the harness re-dispatch them and lose the native result correlation.
+ */
 export function buildMcpToolDefinitions(tools: readonly ToolSchema[] | undefined): McpToolDefinition[] {
   if (tools === undefined || tools.length === 0) return []
-  const native = new Set(['bash', 'read', 'write', 'delete', 'ls', 'grep', 'todo'])
+  const native = new Set(['bash', 'read', 'write', 'delete', 'ls', 'grep', 'edit', 'todo', 'todo_write'])
   return tools.filter(tool => !native.has(tool.name)).map(tool => {
     const schemaValue: JsonValue = isJsonValue(tool.parameters)
       ? tool.parameters
       : { type: 'object', properties: {}, required: [] }
+    const schemaJson = JSON.stringify(schemaValue)
     return create(McpToolDefinitionSchema, {
       name: tool.name,
       description: tool.description,
       providerIdentifier: 'dsh-plugin-subscriptions',
       toolName: tool.name,
       inputSchema: encodeJsonValue(schemaValue),
+      inputSchemaJson: schemaJson,
     })
   })
 }

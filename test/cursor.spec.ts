@@ -307,6 +307,7 @@ test('CursorAdapter listModels returns [] when logged out', async () => {
 test('buildMcpToolDefinitions skips native Cursor tool names', () => {
   const tools = buildMcpToolDefinitions([
     { name: 'bash', description: 'shell', parameters: { type: 'object', properties: {} } },
+    { name: 'write', description: 'write', parameters: { type: 'object', properties: {} } },
     { name: 'search', description: 'search', parameters: { type: 'object', properties: {} } },
   ])
   assert.equal(tools.length, 1)

@@ -5,7 +5,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import http2 from 'node:http2'
 import {
-  CallId,
   EMPTY_RESPONSE_CODE,
   LlmError,
   type StreamChunk,
@@ -31,8 +30,22 @@ import {
   type ExecServerMessage,
   type KvServerMessage,
   type McpToolDefinition,
+  type ShellStream,
 } from '../providers/cursor-proto/cursor-proto.js'
 import { create, fromBinary, toBinary } from '../providers/cursor-proto/protobuf.js'
+import {
+  execDelete,
+  execGrep,
+  execLs,
+  execMcp,
+  execRead,
+  execShell,
+  execShellStream,
+  execWrite,
+  type ExecuteMcpTool,
+  type NativeExecContext,
+  type NativeExecResult,
+} from './cursor-native-exec.js'
 import { CURSOR_API_URL } from '../providers/cursor.js'
 import type { CursorSession } from '../auth/store.js'
 import { handleInteractionQuery } from './cursor-interaction.js'
@@ -50,34 +63,16 @@ import {
   parseConnectEndStream,
 } from './cursor-wire.js'
 
-interface ToolCallState {
-  index: number
-  id: string
-  name: string
-  argsBuffer: string
-  envelopeId?: string
-}
-
-interface StreamParseState {
+/** Stream assembly state: block indexes and token counters. */
+export interface StreamParseState {
   nextIndex: number
   textIndex?: number
   reasoningIndex?: number
-  toolCalls: Map<string, ToolCallState>
-  openByEnvelope: Map<string, ToolCallState>
-  sawToolCall: boolean
   outputTokens: number
 }
 
 function createStreamState(): StreamParseState {
-  return { nextIndex: 0, toolCalls: new Map(), openByEnvelope: new Map(), sawToolCall: false, outputTokens: 0 }
-}
-
-function selectMcpCall(toolCall: { tool?: { case?: string; value?: unknown } } | undefined): {
-  args?: { toolCallId?: string; toolName?: string; name?: string; args?: Record<string, Uint8Array> }
-} | undefined {
-  const oneof = toolCall?.tool
-  if (oneof?.case === 'mcpToolCall') return oneof.value as ReturnType<typeof selectMcpCall>
-  return undefined
+  return { nextIndex: 0, outputTokens: 0 }
 }
 
 function pushTextDelta(state: StreamParseState, push: (chunk: StreamChunk) => void, delta: string): void {
@@ -112,15 +107,6 @@ function pushReasoningDelta(state: StreamParseState, push: (chunk: StreamChunk) 
   push({ type: 'reasoning-delta', index: state.reasoningIndex, text: delta })
 }
 
-function resolveToolCall(state: StreamParseState, envelopeId: string | undefined, fallbackId?: string): ToolCallState | undefined {
-  if (envelopeId !== undefined) {
-    const byEnvelope = state.openByEnvelope.get(envelopeId)
-    if (byEnvelope !== undefined) return byEnvelope
-  }
-  if (fallbackId !== undefined) return state.toolCalls.get(fallbackId)
-  return undefined
-}
-
 function processInteractionUpdate(
   update: unknown,
   state: StreamParseState,
@@ -140,54 +126,6 @@ function processInteractionUpdate(
     pushReasoningDelta(state, push, delta)
   } else if (updateCase === 'thinkingCompleted') {
     endReasoningBlock(state, push, textBuffers.reasoning)
-  } else if (updateCase === 'toolCallStarted') {
-    endTextBlock(state, push, textBuffers.text)
-    endReasoningBlock(state, push, textBuffers.reasoning)
-    const toolCall = value.toolCall as { tool?: { case?: string; value?: unknown } } | undefined
-    const mcpCall = selectMcpCall(toolCall)
-    if (mcpCall === undefined) return
-    const args = mcpCall.args ?? {}
-    const id = args.toolCallId ?? randomUUID()
-    const name = args.toolName ?? args.name ?? ''
-    const index = state.nextIndex++
-    const block: ToolCallState = { index, id: String(id), name: String(name), argsBuffer: '' }
-    state.toolCalls.set(block.id, block)
-    const envelopeId = typeof value.callId === 'string' ? value.callId : undefined
-    if (envelopeId !== undefined) state.openByEnvelope.set(envelopeId, block)
-    state.sawToolCall = true
-    push({ type: 'block-start', index, blockType: 'tool-call' })
-    push({ type: 'tool-call-delta', index, id: CallId(String(id)), name: String(name), argumentsDelta: '' })
-  } else if (updateCase === 'toolCallDelta' || updateCase === 'partialToolCall') {
-    const envelopeId = typeof value.callId === 'string' ? value.callId : undefined
-    const target = resolveToolCall(state, envelopeId)
-    if (target === undefined) return
-    const snapshot = typeof value.argsTextDelta === 'string' ? value.argsTextDelta : ''
-    const chunk = snapshot.startsWith(target.argsBuffer) ? snapshot.slice(target.argsBuffer.length) : snapshot
-    if (chunk.length === 0) return
-    target.argsBuffer = target.argsBuffer + chunk
-    push({
-      type: 'tool-call-delta',
-      index: target.index,
-      id: CallId(target.id),
-      name: target.name,
-      argumentsDelta: chunk,
-    })
-  } else if (updateCase === 'toolCallCompleted') {
-    const envelopeId = typeof value.callId === 'string' ? value.callId : undefined
-    const target = resolveToolCall(state, envelopeId)
-    if (target === undefined) return
-    push({
-      type: 'block-end',
-      index: target.index,
-      block: {
-        type: 'tool-call',
-        id: CallId(target.id),
-        name: target.name,
-        arguments: target.argsBuffer.length > 0 ? target.argsBuffer : '{}',
-      },
-    })
-    state.toolCalls.delete(target.id)
-    if (envelopeId !== undefined) state.openByEnvelope.delete(envelopeId)
   } else if (updateCase === 'tokenDelta') {
     const tokens = typeof value.tokens === 'number' && Number.isFinite(value.tokens) ? value.tokens : 0
     state.outputTokens += tokens
@@ -199,10 +137,14 @@ function sendExecClientMessage(
   execMsg: ExecServerMessage,
   messageCase: string,
   value: unknown,
+  localExecutionTimeMs?: number,
 ): void {
+  // In-flight exec results can settle after the stream was torn down.
+  if (h2Request.closed || h2Request.destroyed) return
   const execClientMessage = create(ExecClientMessageSchema, {
     id: execMsg.id,
     execId: execMsg.execId,
+    ...(localExecutionTimeMs === undefined ? {} : { localExecutionTimeMs }),
     message: { case: messageCase, value } as never,
   })
   const clientMessage = create(AgentClientMessageSchema, {
@@ -212,6 +154,7 @@ function sendExecClientMessage(
 }
 
 function sendExecClientThrow(h2Request: http2.ClientHttp2Stream, execMsg: ExecServerMessage, error: string): void {
+  if (h2Request.closed || h2Request.destroyed) return
   const controlMessage = create(ExecClientControlMessageSchema, {
     message: {
       case: 'throw',
@@ -222,12 +165,19 @@ function sendExecClientThrow(h2Request: http2.ClientHttp2Stream, execMsg: ExecSe
     message: { case: 'execClientControlMessage', value: controlMessage },
   })
   h2Request.write(frameConnectMessage(toBinary(AgentClientMessageSchema, clientMessage)))
+  sendExecClientStreamClose(h2Request, execMsg)
+}
+
+/** Close one exec frame after its result, signalling the frame is complete. */
+function sendExecClientStreamClose(h2Request: http2.ClientHttp2Stream, execMsg: ExecServerMessage): void {
+  if (h2Request.closed || h2Request.destroyed) return
   const closeMessage = create(ExecClientControlMessageSchema, {
     message: { case: 'streamClose', value: create(ExecClientStreamCloseSchema, { id: execMsg.id }) },
   })
-  h2Request.write(frameConnectMessage(toBinary(AgentClientMessageSchema, create(AgentClientMessageSchema, {
+  const clientMessage = create(AgentClientMessageSchema, {
     message: { case: 'execClientControlMessage', value: closeMessage },
-  }))))
+  })
+  h2Request.write(frameConnectMessage(toBinary(AgentClientMessageSchema, clientMessage)))
 }
 
 function handleKvServerMessage(
@@ -267,12 +217,22 @@ function handleKvServerMessage(
   }
 }
 
-function handleExecServerMessage(
+/**
+ * Execute one Cursor exec message natively and send the matching result back
+ * on the Connect stream. The Cursor cloud agent drives its own tool loop, so
+ * results are relayed directly rather than surfaced as harness tool calls;
+ * execution runs in the background and results are correlated by `execMsg.id`,
+ * so out-of-order completion is fine.
+ *
+ * Exported for tests.
+ */
+export async function handleExecServerMessage(
   execMsg: ExecServerMessage,
   h2Request: http2.ClientHttp2Stream,
   requestContextTools: McpToolDefinition[],
   requestContextRules: CursorRule[],
-): void {
+  nativeExec: NativeExecContext,
+): Promise<void> {
   const execCase = execMsg.message.case
   if (execCase === 'requestContextArgs') {
     const requestContext = create(RequestContextSchema, {
@@ -291,6 +251,93 @@ function handleExecServerMessage(
     sendExecClientMessage(h2Request, execMsg, 'requestContextResult', requestContextResult)
     return
   }
+
+  // Every remaining case runs a tool: send the shaped result once the native
+  // executor settles. The tool call itself stays internal to the Cursor agent.
+  const runResult = (run: () => Promise<NativeExecResult>): void => {
+    void run().then(outcome => {
+      sendExecClientMessage(
+        h2Request,
+        execMsg,
+        outcome.message.case,
+        outcome.message.value,
+        outcome.localExecutionTimeMs,
+      )
+    }).catch(error => {
+      sendExecClientThrow(h2Request, execMsg, errorMessage(error))
+    })
+  }
+  const runStream = (stream: (send: (message: ShellStream) => void) => Promise<void>): void => {
+    void stream(message => {
+      sendExecClientMessage(h2Request, execMsg, 'shellStream', message)
+    }).catch(error => {
+      sendExecClientThrow(h2Request, execMsg, errorMessage(error))
+    })
+  }
+
+  // The cloud agent often leaves the working directory / root path unset and
+  // expects the client to run tools in its own cwd. Default to the session's
+  // validated cwd (when known) so `pwd`, `ls`, and bare greps land in the
+  // session workspace instead of the plugin process's directory.
+  const sessionCwd = nativeExec.cwd ?? ''
+  const shellDir = (workingDirectory: string): string =>
+    workingDirectory.length > 0 ? workingDirectory : sessionCwd
+  const rootPath = (path: string | undefined): string =>
+    path !== undefined && path.length > 0 ? path : sessionCwd
+
+  switch (execCase) {
+    case 'mcpArgs': {
+      const args = execMsg.message.value
+      runResult(() => execMcp(args, nativeExec))
+      return
+    }
+    case 'shellArgs': {
+      const args = execMsg.message.value
+      runResult(() => execShell({ ...args, workingDirectory: shellDir(args.workingDirectory) }, nativeExec.signal))
+      return
+    }
+    case 'shellStreamArgs': {
+      const args = execMsg.message.value
+      runStream(send => execShellStream(
+        { ...args, workingDirectory: shellDir(args.workingDirectory) },
+        nativeExec.signal,
+        send,
+        (result, localExecutionTimeMs) => {
+          // The server keeps the turn pending when it receives only stream
+          // deltas; the final structured result + streamClose acknowledge the
+          // exec frame's completion so the agent can move on and finish.
+          sendExecClientMessage(h2Request, execMsg, 'shellResult', result, localExecutionTimeMs)
+          sendExecClientStreamClose(h2Request, execMsg)
+        },
+      ))
+      return
+    }
+    case 'readArgs': {
+      const args = execMsg.message.value
+      runResult(() => execRead(args, nativeExec.signal))
+      return
+    }
+    case 'writeArgs': {
+      const args = execMsg.message.value
+      runResult(() => execWrite(args, nativeExec.signal))
+      return
+    }
+    case 'grepArgs': {
+      const args = execMsg.message.value
+      runResult(() => execGrep({ ...args, path: rootPath(args.path) }, nativeExec.signal))
+      return
+    }
+    case 'lsArgs': {
+      const args = execMsg.message.value
+      runResult(() => execLs({ ...args, path: rootPath(args.path) }, nativeExec.signal))
+      return
+    }
+    case 'deleteArgs': {
+      const args = execMsg.message.value
+      runResult(() => execDelete(args, nativeExec.signal))
+      return
+    }
+  }
   sendExecClientThrow(
     h2Request,
     execMsg,
@@ -300,6 +347,43 @@ function handleExecServerMessage(
   )
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/** Fire-and-forget wrapper used by the frame parser; failures become a throw. */
+function dispatchExecServerMessage(
+  execMsg: ExecServerMessage,
+  h2Request: http2.ClientHttp2Stream,
+  requestContextTools: McpToolDefinition[],
+  requestContextRules: CursorRule[],
+  nativeExec: NativeExecContext,
+): void {
+  void handleExecServerMessage(
+    execMsg,
+    h2Request,
+    requestContextTools,
+    requestContextRules,
+    nativeExec,
+  ).catch(error => {
+    sendExecClientThrow(h2Request, execMsg, errorMessage(error))
+  })
+}
+
+/** Resolve the per-stream native exec context (optional harness MCP hook). */
+function buildNativeExecContext(
+  resolveExecuteMcpTool: (() => ExecuteMcpTool | undefined) | undefined,
+  signal: AbortSignal | undefined,
+  cwd: string | undefined,
+): NativeExecContext {
+  const executeMcpTool = resolveExecuteMcpTool?.()
+  return {
+    signal: signal ?? new AbortController().signal,
+    ...(cwd === undefined ? {} : { cwd }),
+    ...(executeMcpTool === undefined ? {} : { executeMcpTool }),
+  }
+}
+
 function handleServerMessage(
   msg: AgentServerMessage,
   blobStore: Map<string, Uint8Array>,
@@ -307,6 +391,7 @@ function handleServerMessage(
   requestContextTools: McpToolDefinition[],
   requestContextRules: CursorRule[],
   conversationId: string,
+  nativeExec: NativeExecContext,
   state: StreamParseState,
   textBuffers: { text: string; reasoning: string },
   push: (chunk: StreamChunk) => void,
@@ -319,7 +404,13 @@ function handleServerMessage(
   if (msgCase === 'kvServerMessage') {
     handleKvServerMessage(msg.message.value as KvServerMessage, blobStore, h2Request)
   } else if (msgCase === 'execServerMessage') {
-    handleExecServerMessage(msg.message.value as ExecServerMessage, h2Request, requestContextTools, requestContextRules)
+    dispatchExecServerMessage(
+      msg.message.value as ExecServerMessage,
+      h2Request,
+      requestContextTools,
+      requestContextRules,
+      nativeExec,
+    )
   } else if (msgCase === 'interactionQuery') {
     handleInteractionQuery(msg.message.value, h2Request)
   } else if (msgCase === 'conversationCheckpointUpdate') {
@@ -334,6 +425,17 @@ export interface CursorStreamOptions extends BuildCursorRunOptions {
   baseUrl?: string
   /** Called on every inbound Connect frame (keeps an idle watchdog alive). */
   onActivity?: () => void
+  /**
+   * Default working directory for native execs whose args omit one (the
+   * session's validated cwd); executors fall back to the plugin process cwd
+   * when unset.
+   */
+  cwd?: string
+  /**
+   * Resolves the harness tool executor for native MCP tool calls, when the
+   * `tools` service is mounted. Resolved once per stream.
+   */
+  executeMcpTool?: () => ExecuteMcpTool | undefined
 }
 
 const HEARTBEAT_INTERVAL_MS = 5_000
@@ -391,6 +493,7 @@ async function* streamCursorOnce(
 
   const parseState = createStreamState()
   const textBuffers = { text: '', reasoning: '' }
+  const nativeExec = buildNativeExecContext(options.executeMcpTool, options.signal, options.cwd)
   let sawTurnEnded = false
 
   const baseUrl = options.baseUrl ?? CURSOR_API_URL
@@ -451,6 +554,7 @@ async function* streamCursorOnce(
           built.mcpTools,
           built.rules,
           built.conversationId,
+          nativeExec,
           parseState,
           textBuffers,
           push,
@@ -464,7 +568,9 @@ async function* streamCursorOnce(
     notify?.()
   })
 
-  h2Request.on('end', settle)
+  h2Request.on('end', () => {
+    settle()
+  })
   h2Request.on('error', error => {
     streamError = error instanceof Error ? error : new Error(String(error))
     settle()
@@ -521,7 +627,7 @@ async function* streamCursorOnce(
   if (parseState.outputTokens > 0) {
     yield { type: 'usage', usage: { inputTokens: 0, outputTokens: parseState.outputTokens } }
   }
-  yield { type: 'finish', reason: { kind: parseState.sawToolCall ? 'tool-calls' : 'stop' } }
+  yield { type: 'finish', reason: { kind: 'stop' } }
 }
 
 /** Exported for tests. */
