@@ -36,17 +36,18 @@
 
 ## Provider 一览
 
-| 路由     | 订阅             | 模型 | 协议 |
-|----------|------------------|------|------|
-| `codex`  | ChatGPT Plus/Pro/Team/Enterprise | 从 `chatgpt.com/backend-api/codex/models` 实时获取 | OpenAI Responses SSE |
-| `claude` | Claude Pro/Max   | 订阅内所有可用模型（Opus、Sonnet、Haiku、Fable —— 静态目录，随插件更新） | Anthropic Messages SSE |
-| `grok`   | X Premium (xAI)  | 从 `api.x.ai/v1/models` 实时获取（仅对话模型）；推理等级来自 Grok CLI 目录（`cli-chat-proxy.grok.com/v1/models`） | OpenAI Responses SSE |
-| `gemini` | Google AI (Antigravity) | 从 Antigravity Cloud Code Assist `fetchAvailableModels` 实时获取（仅 Gemini 模型）；登录时像官方 Antigravity/Gemini CLI 一样开通 Cloud Code Assist 项目 | Google Cloud Code Assist SSE |
-| `cursor` | Cursor Pro/Business/Ultra | 从 `api2.cursor.sh/aiserver.v1.AiService/GetUsableModels` 实时获取（Composer、Claude、GPT 等） | HTTP/2 Connect / Protobuf（`AgentService/Run`） |
+| 路由       | 订阅                               | 模型                                                                                                                               | 协议                                            |
+| -------- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| `codex`  | ChatGPT Plus/Pro/Team/Enterprise | 从 `chatgpt.com/backend-api/codex/models` 实时获取                                                                                    | OpenAI Responses SSE                          |
+| `claude` | Claude Pro/Max                   | 订阅内所有可用模型（Opus、Sonnet、Haiku、Fable —— 静态目录，随插件更新）                                                                                 | Anthropic Messages SSE                        |
+| `grok`   | X Premium (xAI)                  | 从 `api.x.ai/v1/models` 实时获取（仅对话模型）；推理等级来自 Grok CLI 目录（`cli-chat-proxy.grok.com/v1/models`）                                       | OpenAI Responses SSE                          |
+| `gemini` | Google AI (Antigravity)          | 从 Antigravity Cloud Code Assist `fetchAvailableModels` 实时获取（仅 Gemini 模型）；登录时像官方 Antigravity/Gemini CLI 一样开通 Cloud Code Assist 项目 | Google Cloud Code Assist SSE                  |
+| `cursor` | Cursor Pro/Business/Ultra        | 从 `api2.cursor.sh/aiserver.v1.AiService/GetUsableModels` 实时获取（Composer、Claude、GPT 等）                                             | HTTP/2 Connect / Protobuf（`AgentService/Run`） |
 
 只有已登录的 provider 才会出现在会话模型选择器里；登录/退出后列表自动刷新。支持视觉的模型会声明 `['text', 'image']` 输入模态，图片内容会被翻译成各 provider 的 wire 格式。
 
 已登录的卡片还会显示**订阅用量** —— 按限额窗口（5 小时会话窗、每周窗，以及计划包含的按模型每周窗）展示已用百分比、进度条和重置时间，并带刷新按钮：
+
 - **Codex**：来自 `chatgpt.com/backend-api/wham/usage`（5 小时会话窗口、每周窗口及套餐类型）
 - **Claude**：来自 `api.anthropic.com/api/oauth/usage`（5 小时与 7 天限额窗口）
 - **Grok**：来自 Grok Build CLI 代理的 `cli-chat-proxy.grok.com/v1/billing`（CLI `/usage` 来源，包含每周共享额度与订阅档位）
@@ -156,3 +157,4 @@ pnpm test      # 编译后跑 node --test 单测
 - `src/translate/` —— dsh `Message[]` 与 OpenAI Responses / Anthropic Messages / Gemini (Cloud Code Assist) / Cursor 格式互转，SSE 与 HTTP/2 Connect 流解析
 - `src/tools/` —— `x_search`、`image_generate` 与 `video_generate`
 - `src/client/` —— 设置 → 订阅页面及速度切换开关（浏览器面，中英文，跟随明暗主题）
+
