@@ -8,31 +8,31 @@
 
 设置 → **订阅**：每个 provider 的登录/退出，无需 API key。Claude 从 Claude Code 导入凭据；Codex、Grok 和 Gemini 使用 OAuth；Cursor 支持 Deep Control 轮询登录或 API Key 粘贴（截图中账号已打码）：
 
-![订阅设置页](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/subscriptions.png)
+![订阅设置页](https://raw.githubusercontent.com/jgyhc/dsh-plugin-subscriptions/main/docs/images/subscriptions.png)
 
 已登录的 provider 会带着实时模型目录进入会话模型选择器：
 
-![模型选择器中的订阅模型](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/model-picker.png)
+![模型选择器中的订阅模型](https://raw.githubusercontent.com/jgyhc/dsh-plugin-subscriptions/main/docs/images/model-picker.png)
 
 声明了推理等级的模型会在同一菜单里多出**推理等级**选择 —— Codex 系列模型、Grok 4.6 / 4.5 以及 Cursor 模型（档位和默认值来自各 provider 的实时目录，不是硬编码列表）：
 
-![推理等级选择器](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/model-effort.png)
+![推理等级选择器](https://raw.githubusercontent.com/jgyhc/dsh-plugin-subscriptions/main/docs/images/model-effort.png)
 
 目录声明了 fast tier（即 codex CLI 的 fast 模式）的 Codex 模型，会在输入框工具行（模型选择器旁）多出一个**速度**开关 —— 标准 / 快速（`service_tier: priority`），按会话生效。`/fast` 斜杠命令提供同样的弹窗选择；当前模型不支持快速档时会提示原因。
 
-![速度开关及其标准/快速菜单](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
+![速度开关及其标准/快速菜单](https://raw.githubusercontent.com/jgyhc/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
 
 `image_generate` 工具生成的图片直接内联显示在对话里：
 
-![image_generate 内联显示生成的图片](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/image-generate-inline.png)
+![image_generate 内联显示生成的图片](https://raw.githubusercontent.com/jgyhc/dsh-plugin-subscriptions/main/docs/images/image-generate-inline.png)
 
 `provider` 参数可选择生图后端 —— 同一条提示词分别走 GPT（`gpt-image-2`，上）和 Grok（`grok-imagine-image-2.0`，下）：
 
-![image_generate 的 provider 参数对比 gpt 与 grok](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/image-generate-providers.png)
+![image_generate 的 provider 参数对比 gpt 与 grok](https://raw.githubusercontent.com/jgyhc/dsh-plugin-subscriptions/main/docs/images/image-generate-providers.png)
 
 `video_generate` 工具生成的视频直接内联播放：
 
-![video_generate 内联播放生成的视频](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/video-generate-inline.png)
+![video_generate 内联播放生成的视频](https://raw.githubusercontent.com/jgyhc/dsh-plugin-subscriptions/main/docs/images/video-generate-inline.png)
 
 ## Provider 一览
 
@@ -71,7 +71,7 @@ dsh plugin --profile web add dsh-plugin-subscriptions
 也可以从 GitHub 安装源码：
 
 ```sh
-dsh plugin --profile web add github:V1ki/dsh-plugin-subscriptions
+dsh plugin --profile web add github:jgyhc/dsh-plugin-subscriptions
 ```
 
 首次安装 pnpm 会要求允许该包的构建脚本（git 安装拉取的是源码而非构建产物）；把打印出的包名加进 profile 的 `pnpm-workspace.yaml`：
@@ -86,7 +86,7 @@ allowBuilds:
 本地检出安装：
 
 ```sh
-git clone https://github.com/V1ki/dsh-plugin-subscriptions.git
+git clone https://github.com/jgyhc/dsh-plugin-subscriptions.git
 cd dsh-plugin-subscriptions && pnpm install && pnpm build
 dsh plugin --profile web add ./dsh-plugin-subscriptions
 ```
@@ -106,7 +106,7 @@ npm 安装的：
 dsh plugin --profile web update --latest dsh-plugin-subscriptions
 ```
 
-GitHub 安装的：重新执行一遍 `add github:V1ki/dsh-plugin-subscriptions` —— 会重新拉取源码并构建。link 的本地检出只需在检出目录里 `git pull && pnpm build`。
+GitHub 安装的：重新执行一遍 `add github:jgyhc/dsh-plugin-subscriptions` —— 会重新拉取源码并构建。link 的本地检出只需在检出目录里 `git pull && pnpm build`。
 
 无论哪种方式，更新后都要重启 `dsh web` 才会加载新版本。
 

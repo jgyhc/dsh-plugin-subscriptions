@@ -3,3 +3,4 @@ lib/
 lib-test/
 *.tgz
 overlay.yml
+.codegraph/

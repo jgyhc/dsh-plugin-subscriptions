@@ -8,31 +8,31 @@ Use your **ChatGPT (Codex)**, **Claude**, **Grok (X Premium)**, **Gemini (Google
 
 Settings → **Subscriptions**: per-provider login/logout, no API keys. Claude imports credentials from Claude Code; Codex, Grok, and Gemini use OAuth; Cursor supports Deep Control OAuth polling or API key paste (account address masked in the screenshot):
 
-![Subscriptions settings page](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/subscriptions.png)
+![Subscriptions settings page](https://raw.githubusercontent.com/jgyhc/dsh-plugin-subscriptions/main/docs/images/subscriptions.png)
 
 Logged-in providers join the session model picker with their live model catalogs:
 
-![Model picker with subscription models](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/model-picker.png)
+![Model picker with subscription models](https://raw.githubusercontent.com/jgyhc/dsh-plugin-subscriptions/main/docs/images/model-picker.png)
 
 Models that advertise reasoning levels get an **Effort** selector in the same menu — Codex models, Grok 4.6 / 4.5, and Cursor models (levels and defaults come from each provider's live catalog, not a hardcoded list):
 
-![Reasoning effort selector](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/model-effort.png)
+![Reasoning effort selector](https://raw.githubusercontent.com/jgyhc/dsh-plugin-subscriptions/main/docs/images/model-effort.png)
 
 Codex models whose catalog advertises the fast tier (the codex CLI's fast mode) get a **Speed** toggle in the composer's tool row, next to the model selector — Standard or Fast (`service_tier: priority`), per session. The `/fast` slash command offers the same choice as a popup; it errors with an explanation when the current model has no fast tier.
 
-![Speed toggle with the Standard/Fast menu open](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
+![Speed toggle with the Standard/Fast menu open](https://raw.githubusercontent.com/jgyhc/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
 
 The `image_generate` tool renders its result inline in the conversation:
 
-![image_generate renders the image inline](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/image-generate-inline.png)
+![image_generate renders the image inline](https://raw.githubusercontent.com/jgyhc/dsh-plugin-subscriptions/main/docs/images/image-generate-inline.png)
 
 Its `provider` parameter picks the image backend — the same prompt through GPT (`gpt-image-2`, top) and Grok (`grok-imagine-image-2.0`, bottom):
 
-![image_generate with provider gpt vs grok](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/image-generate-providers.png)
+![image_generate with provider gpt vs grok](https://raw.githubusercontent.com/jgyhc/dsh-plugin-subscriptions/main/docs/images/image-generate-providers.png)
 
 The `video_generate` tool plays the generated clip inline:
 
-![video_generate plays the clip inline](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/video-generate-inline.png)
+![video_generate plays the clip inline](https://raw.githubusercontent.com/jgyhc/dsh-plugin-subscriptions/main/docs/images/video-generate-inline.png)
 
 ## Providers
 
@@ -70,7 +70,7 @@ dsh plugin --profile web add dsh-plugin-subscriptions
 Or install the sources from GitHub:
 
 ```sh
-dsh plugin --profile web add github:V1ki/dsh-plugin-subscriptions
+dsh plugin --profile web add github:jgyhc/dsh-plugin-subscriptions
 ```
 
 pnpm will ask you to allow this package's build script on first install (git installs fetch sources, not built artifacts); add the printed key to the profile's `pnpm-workspace.yaml`:
@@ -85,7 +85,7 @@ and re-run the `add`. Only grant this to packages you trust — it runs the pack
 From a local checkout instead:
 
 ```sh
-git clone https://github.com/V1ki/dsh-plugin-subscriptions.git
+git clone https://github.com/jgyhc/dsh-plugin-subscriptions.git
 cd dsh-plugin-subscriptions && pnpm install && pnpm build
 dsh plugin --profile web add ./dsh-plugin-subscriptions
 ```
@@ -105,7 +105,7 @@ Installed from npm:
 dsh plugin --profile web update --latest dsh-plugin-subscriptions
 ```
 
-Installed from GitHub: re-run the same `add github:V1ki/dsh-plugin-subscriptions` command — it re-fetches the sources and rebuilds. A linked local checkout just needs `git pull && pnpm build` in the checkout.
+Installed from GitHub: re-run the same `add github:jgyhc/dsh-plugin-subscriptions` command — it re-fetches the sources and rebuilds. A linked local checkout just needs `git pull && pnpm build` in the checkout.
 
 Either way, restart `dsh web` afterwards so the new version loads.
 
