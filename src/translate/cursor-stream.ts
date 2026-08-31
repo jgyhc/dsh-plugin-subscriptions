@@ -67,50 +67,57 @@ import {
 export interface StreamParseState {
   nextIndex: number
   textIndex?: number
+  textBuffer: string
   reasoningIndex?: number
+  reasoningBuffer: string
   outputTokens: number
 }
 
-function createStreamState(): StreamParseState {
-  return { nextIndex: 0, outputTokens: 0 }
+export function createStreamState(): StreamParseState {
+  return { nextIndex: 0, textBuffer: '', reasoningBuffer: '', outputTokens: 0 }
 }
 
-function pushTextDelta(state: StreamParseState, push: (chunk: StreamChunk) => void, delta: string): void {
+export function pushTextDelta(state: StreamParseState, push: (chunk: StreamChunk) => void, delta: string): void {
   if (delta.length === 0) return
   if (state.textIndex === undefined) {
     state.textIndex = state.nextIndex++
+    state.textBuffer = ''
     push({ type: 'block-start', index: state.textIndex, blockType: 'text' })
   }
+  state.textBuffer += delta
   push({ type: 'text-delta', index: state.textIndex, text: delta })
 }
 
-function endTextBlock(state: StreamParseState, push: (chunk: StreamChunk) => void, text: string): void {
+export function endTextBlock(state: StreamParseState, push: (chunk: StreamChunk) => void): void {
   if (state.textIndex === undefined) return
   const index = state.textIndex
-  push({ type: 'block-end', index, block: { type: 'text', text } })
+  push({ type: 'block-end', index, block: { type: 'text', text: state.textBuffer } })
   delete state.textIndex
+  state.textBuffer = ''
 }
 
-function endReasoningBlock(state: StreamParseState, push: (chunk: StreamChunk) => void, text: string): void {
+export function endReasoningBlock(state: StreamParseState, push: (chunk: StreamChunk) => void): void {
   if (state.reasoningIndex === undefined) return
   const index = state.reasoningIndex
-  push({ type: 'block-end', index, block: { type: 'reasoning', text } })
+  push({ type: 'block-end', index, block: { type: 'reasoning', text: state.reasoningBuffer } })
   delete state.reasoningIndex
+  state.reasoningBuffer = ''
 }
 
-function pushReasoningDelta(state: StreamParseState, push: (chunk: StreamChunk) => void, delta: string): void {
+export function pushReasoningDelta(state: StreamParseState, push: (chunk: StreamChunk) => void, delta: string): void {
   if (delta.length === 0) return
   if (state.reasoningIndex === undefined) {
     state.reasoningIndex = state.nextIndex++
+    state.reasoningBuffer = ''
     push({ type: 'block-start', index: state.reasoningIndex, blockType: 'reasoning' })
   }
+  state.reasoningBuffer += delta
   push({ type: 'reasoning-delta', index: state.reasoningIndex, text: delta })
 }
 
-function processInteractionUpdate(
+export function processInteractionUpdate(
   update: unknown,
   state: StreamParseState,
-  textBuffers: { text: string; reasoning: string },
   push: (chunk: StreamChunk) => void,
 ): void {
   const record = update as { message?: { case?: string; value?: Record<string, unknown> } }
@@ -118,14 +125,12 @@ function processInteractionUpdate(
   const value = record.message?.value ?? {}
   if (updateCase === 'textDelta') {
     const delta = typeof value.text === 'string' ? value.text : ''
-    textBuffers.text += delta
     pushTextDelta(state, push, delta)
   } else if (updateCase === 'thinkingDelta') {
     const delta = typeof value.text === 'string' ? value.text : ''
-    textBuffers.reasoning += delta
     pushReasoningDelta(state, push, delta)
   } else if (updateCase === 'thinkingCompleted') {
-    endReasoningBlock(state, push, textBuffers.reasoning)
+    endReasoningBlock(state, push)
   } else if (updateCase === 'tokenDelta') {
     const tokens = typeof value.tokens === 'number' && Number.isFinite(value.tokens) ? value.tokens : 0
     state.outputTokens += tokens
@@ -393,12 +398,11 @@ function handleServerMessage(
   conversationId: string,
   nativeExec: NativeExecContext,
   state: StreamParseState,
-  textBuffers: { text: string; reasoning: string },
   push: (chunk: StreamChunk) => void,
 ): boolean {
   const msgCase = msg.message.case
   if (msgCase === 'interactionUpdate') {
-    processInteractionUpdate(msg.message.value, state, textBuffers, push)
+    processInteractionUpdate(msg.message.value, state, push)
     return msg.message.value.message?.case === 'turnEnded'
   }
   if (msgCase === 'kvServerMessage') {
@@ -492,7 +496,6 @@ async function* streamCursorOnce(
   }
 
   const parseState = createStreamState()
-  const textBuffers = { text: '', reasoning: '' }
   const nativeExec = buildNativeExecContext(options.executeMcpTool, options.signal, options.cwd)
   let sawTurnEnded = false
 
@@ -556,7 +559,6 @@ async function* streamCursorOnce(
           built.conversationId,
           nativeExec,
           parseState,
-          textBuffers,
           push,
         )) {
           sawTurnEnded = true
@@ -620,8 +622,8 @@ async function* streamCursorOnce(
     throw new LlmError('Cursor stream ended before turnEnded', EMPTY_RESPONSE_CODE)
   }
 
-  endTextBlock(parseState, push, textBuffers.text)
-  endReasoningBlock(parseState, push, textBuffers.reasoning)
+  endTextBlock(parseState, push)
+  endReasoningBlock(parseState, push)
   while (queue.length > 0) yield queue.shift()!
 
   if (parseState.outputTokens > 0) {

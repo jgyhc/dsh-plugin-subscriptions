@@ -12,6 +12,11 @@ import {
   buildCursorRunRequest,
   resetCursorConversationCache,
 } from '../src/translate/cursor-request.js'
+import {
+  createStreamState,
+  processInteractionUpdate,
+} from '../src/translate/cursor-stream.js'
+import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { CursorAdapter } from '../src/providers/cursor-adapter.js'
 import { TokenManager } from '../src/providers/common.js'
 import type { FetchFn } from '../src/providers/common.js'
@@ -350,4 +355,53 @@ test('fetchCursorUsage hits auth/usage and optional summary', async () => {
   assert.equal(usage.windows?.[0]?.usedPercent, 8)
   assert.ok(calls.some(call => urlIs(CURSOR_USAGE_URL, call.url)))
   assert.ok(calls.some(call => urlIs(CURSOR_API_USAGE_SUMMARY_URL, call.url)))
+})
+
+test('processInteractionUpdate handles multiple separate thinking blocks without repeating text', () => {
+  const state = createStreamState()
+  const chunks: StreamChunk[] = []
+  const push = (chunk: StreamChunk): void => {
+    chunks.push(chunk)
+  }
+
+  // 1. First reasoning block
+  processInteractionUpdate({ message: { case: 'thinkingDelta', value: { text: 'Thought 1 delta A. ' } } }, state, push)
+  processInteractionUpdate({ message: { case: 'thinkingDelta', value: { text: 'Thought 1 delta B.' } } }, state, push)
+  processInteractionUpdate({ message: { case: 'thinkingCompleted', value: {} } }, state, push)
+
+  // 2. Interleaved text
+  processInteractionUpdate({ message: { case: 'textDelta', value: { text: 'Some text response' } } }, state, push)
+
+  // 3. Second reasoning block
+  processInteractionUpdate({ message: { case: 'thinkingDelta', value: { text: 'Thought 2 delta A. ' } } }, state, push)
+  processInteractionUpdate({ message: { case: 'thinkingDelta', value: { text: 'Thought 2 delta B.' } } }, state, push)
+  processInteractionUpdate({ message: { case: 'thinkingCompleted', value: {} } }, state, push)
+
+  // 4. Third reasoning block
+  processInteractionUpdate({ message: { case: 'thinkingDelta', value: { text: 'Thought 3 delta.' } } }, state, push)
+  processInteractionUpdate({ message: { case: 'thinkingCompleted', value: {} } }, state, push)
+
+  const blockEnds = chunks.filter(c => c.type === 'block-end')
+  assert.equal(blockEnds.length, 3)
+
+  // Block 0: only Thought 1
+  assert.deepEqual(blockEnds[0], {
+    type: 'block-end',
+    index: 0,
+    block: { type: 'reasoning', text: 'Thought 1 delta A. Thought 1 delta B.' },
+  })
+
+  // Block 2: only Thought 2, NOT Thought 1 + Thought 2
+  assert.deepEqual(blockEnds[1], {
+    type: 'block-end',
+    index: 2,
+    block: { type: 'reasoning', text: 'Thought 2 delta A. Thought 2 delta B.' },
+  })
+
+  // Block 3: only Thought 3
+  assert.deepEqual(blockEnds[2], {
+    type: 'block-end',
+    index: 3,
+    block: { type: 'reasoning', text: 'Thought 3 delta.' },
+  })
 })
