@@ -204,6 +204,47 @@ test('toGeminiTools wraps tools in functionDeclarations', () => {
   assert.deepEqual(toGeminiTools([]), [])
 })
 
+test('toGeminiTools strips empty enum sentinels Gemini rejects', () => {
+  const parameters = {
+    type: 'object',
+    properties: {
+      permission: {
+        type: 'string',
+        enum: [
+          'read-only',
+          'workspace-write',
+          'danger-full-access',
+          'READ-ONLY',
+          'WORKSPACE-WRITE',
+          'DANGER-FULL-ACCESS',
+          '',
+        ],
+      },
+      nested: {
+        type: 'object',
+        properties: {
+          mode: { type: 'string', enum: ['', 'standard'] },
+          emptyOnly: { type: 'string', enum: [''] },
+        },
+      },
+    },
+  }
+  const mapped = toGeminiTools([{ name: 'task_update', description: 'update a task', parameters }])
+  const decls = mapped[0]?.functionDeclarations as Array<{ parameters: typeof parameters }>
+  assert.deepEqual(decls[0].parameters.properties.permission.enum, [
+    'read-only',
+    'workspace-write',
+    'danger-full-access',
+    'READ-ONLY',
+    'WORKSPACE-WRITE',
+    'DANGER-FULL-ACCESS',
+  ])
+  assert.deepEqual(decls[0].parameters.properties.nested.properties.mode.enum, ['standard'])
+  assert.equal('enum' in decls[0].parameters.properties.nested.properties.emptyOnly, false)
+  // Original harness schema is left unchanged for other providers.
+  assert.equal(parameters.properties.permission.enum.includes(''), true)
+})
+
 /** Feed every event through a translator, then the terminal finish; flatten the chunks. */
 function drainGemini(events: GeminiStreamEvent[]): StreamChunk[] {
   const translator = new GeminiStreamTranslator()

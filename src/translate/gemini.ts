@@ -159,6 +159,28 @@ export function toGeminiContents(
 }
 
 /**
+ * Gemini rejects empty strings in JSON Schema `enum` lists
+ * (`cannot be empty` on `function_declarations[].parameters…enum[n]`).
+ * Task-board tools use `""` to mean “clear to session default”; dropping
+ * that sentinel keeps the rest of the enum and lets the model omit the
+ * field instead.
+ */
+function sanitizeGeminiSchema(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sanitizeGeminiSchema)
+  if (typeof value !== 'object' || value === null) return value
+  const out: Record<string, unknown> = {}
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (key === 'enum' && Array.isArray(child)) {
+      const filtered = child.filter(item => item !== '')
+      if (filtered.length > 0) out.enum = filtered.map(sanitizeGeminiSchema)
+      continue
+    }
+    out[key] = sanitizeGeminiSchema(child)
+  }
+  return out
+}
+
+/**
  * Map harness tool schemas to Gemini function declarations.
  * @param tools - tool schemas from the request.
  * @returns Gemini `tools` array entries.
@@ -169,7 +191,7 @@ export function toGeminiTools(tools: readonly ToolSchema[]): Record<string, unkn
     functionDeclarations: tools.map(tool => ({
       name: tool.name,
       description: tool.description,
-      parameters: tool.parameters,
+      parameters: sanitizeGeminiSchema(tool.parameters),
     })),
   }]
 }
