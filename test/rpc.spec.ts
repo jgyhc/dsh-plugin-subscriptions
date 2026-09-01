@@ -179,3 +179,55 @@ test('speed endpoints: per-session tier round trip and payload validation', asyn
     }
   }
 })
+
+test('models endpoint: logged-out provider rejects, payload validation', async () => {
+  const handler = await mount()
+  const signal = new AbortController().signal
+  const result = await handler('models', { provider: 'codex' }, signal)
+  assert.equal(result.ok, false)
+  if (!result.ok) {
+    assert.equal(result.error.code, 'internal')
+    assert.match(result.error.message, /not logged in/)
+  }
+
+  const bad = [
+    [{}, /provider/],
+    [{ provider: 'unknown' }, /provider/],
+    ['nope', /object/],
+  ] as const
+  for (const [payload, pattern] of bad) {
+    const r = await handler('models', payload, signal)
+    assert.equal(r.ok, false, JSON.stringify(payload))
+    if (!r.ok) {
+      assert.equal(r.error.code, 'bad-request')
+      assert.match(r.error.message, pattern)
+    }
+  }
+})
+
+test('testConnectivity endpoint: logged-out provider rejects, payload validation', async () => {
+  const handler = await mount()
+  const signal = new AbortController().signal
+  const result = await handler('testConnectivity', { provider: 'codex', model: 'gpt-4o' }, signal)
+  assert.equal(result.ok, false)
+  if (!result.ok) {
+    assert.equal(result.error.code, 'internal')
+    assert.match(result.error.message, /not logged in/)
+  }
+
+  const bad = [
+    [{}, /provider/],
+    [{ provider: 'codex' }, /model/],
+    [{ provider: 'unknown', model: 'm' }, /provider/],
+    [{ provider: 'codex', model: 123 }, /model/],
+    ['nope', /object/],
+  ] as const
+  for (const [payload, pattern] of bad) {
+    const r = await handler('testConnectivity', payload, signal)
+    assert.equal(r.ok, false, JSON.stringify(payload))
+    if (!r.ok) {
+      assert.equal(r.error.code, 'bad-request')
+      assert.match(r.error.message, pattern)
+    }
+  }
+})

@@ -31,6 +31,20 @@ export interface VideoBytesResult {
   dataBase64: string
 }
 
+/** One model entry returned by the `models` endpoint. */
+export interface ModelInfoResult {
+  id: string
+  name: string
+  description?: string
+}
+
+/** Outcome returned by the `testConnectivity` endpoint. */
+export interface TestConnectivityResult {
+  ok: true
+  latencyMs: number
+  text?: string
+}
+
 /** Bare MP4 file names the `video` endpoint accepts (no path separators). */
 const VIDEO_NAME_PATTERN = /^[\w.-]+\.mp4$/
 
@@ -110,6 +124,21 @@ export interface AuthController {
    * @throws when the file does not exist or cannot be read.
    */
   readVideo(name: string, signal: AbortSignal): Promise<VideoBytesResult>
+  /**
+   * List models available for one logged-in provider.
+   * @param provider - provider id.
+   * @param signal - caller cancellation from the RPC transport.
+   * @throws when logged out or model lookup fails.
+   */
+  models(provider: ProviderId, signal: AbortSignal): Promise<ModelInfoResult[]>
+  /**
+   * Test connectivity to one model on a logged-in provider.
+   * @param provider - provider id.
+   * @param model - model id.
+   * @param signal - caller cancellation from the RPC transport.
+   * @throws when logged out or the test request fails.
+   */
+  testConnectivity(provider: ProviderId, model: string, signal: AbortSignal): Promise<TestConnectivityResult>
 }
 
 /** Payload carried no usable provider id — an RPC client bug, not a server failure. */
@@ -239,6 +268,10 @@ async function dispatch(
       return ok(await controller.readImage(readImageRef(payload), signal))
     case 'video':
       return ok(await controller.readVideo(readVideoName(payload), signal))
+    case 'models':
+      return ok({ models: await controller.models(readProvider(payload), signal) })
+    case 'testConnectivity':
+      return ok(await controller.testConnectivity(readProvider(payload), readString(payload, 'model'), signal))
     case 'speed':
       return ok(await speed.speed(readSessionId(payload)))
     case 'setSpeed':

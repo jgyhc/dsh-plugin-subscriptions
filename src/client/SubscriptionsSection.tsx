@@ -73,6 +73,27 @@ export interface ProviderUsage {
   plan?: string
 }
 
+/** One model returned by the `models` endpoint. */
+export interface ModelInfoResult {
+  id: string
+  name: string
+  description?: string
+}
+
+/** Outcome returned by the `testConnectivity` endpoint. */
+export interface TestConnectivityResult {
+  ok: true
+  latencyMs: number
+  text?: string
+}
+
+/** Viewing state of a provider's connectivity test. */
+export interface TestResultState {
+  status: 'testing' | 'success' | 'error'
+  latencyMs?: number
+  error?: string
+}
+
 /** `login` endpoint value: the URL the user completes OAuth at. */
 interface LoginResponse {
   authorizeUrl: string
@@ -196,6 +217,19 @@ const styles: Record<string, CSSProperties> = {
     background: 'var(--dsw-alias-bg-layer-1)', border: '1px solid var(--dsw-alias-border-l2)',
   },
   usageFill: { height: '100%', borderRadius: 3 },
+  testPanel: {
+    display: 'flex', flexDirection: 'column', gap: 8, marginTop: 4,
+    borderTop: '1px solid var(--dsw-alias-border-l2)', paddingTop: 8,
+  },
+  testRow: {
+    display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+  },
+  select: {
+    boxSizing: 'border-box', height: 28, padding: '0 8px', borderRadius: 14,
+    border: '1px solid var(--dsw-alias-border-l2)', background: 'var(--dsw-alias-bg-layer-1)',
+    color: 'var(--dsw-alias-label-primary)', font: 'inherit', fontSize: 12, lineHeight: '18px',
+    cursor: 'pointer', outline: 'none', maxWidth: 240,
+  },
   manual: { marginTop: 4, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-secondary)' },
   manualRow: { display: 'flex', gap: 8, marginTop: 6 },
   manualInput: {
@@ -335,6 +369,14 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [usages, setUsages] = useState<Partial<Record<SubscriptionProvider, ProviderUsage>>>({})
   const [usageErrors, setUsageErrors] = useState<Partial<Record<SubscriptionProvider, string>>>({})
   const [usageLoading, setUsageLoading] = useState<Partial<Record<SubscriptionProvider, boolean>>>({})
+
+  const [testOpen, setTestOpen] = useState<Partial<Record<SubscriptionProvider, boolean>>>({})
+  const [testModels, setTestModels] = useState<Partial<Record<SubscriptionProvider, ModelInfoResult[]>>>({})
+  const [testModelsLoading, setTestModelsLoading] = useState<Partial<Record<SubscriptionProvider, boolean>>>({})
+  const [testModelsErrors, setTestModelsErrors] = useState<Partial<Record<SubscriptionProvider, string>>>({})
+  const [selectedModels, setSelectedModels] = useState<Partial<Record<SubscriptionProvider, string>>>({})
+  const [testResults, setTestResults] = useState<Partial<Record<SubscriptionProvider, TestResultState>>>({})
+
   const mountedRef = useRef(true)
   const pollersRef = useRef(new Map<SubscriptionProvider, ReturnType<typeof setInterval>>())
   /** Providers with a `usage` call in flight; guards the auto-fetch effect against re-entry. */
@@ -429,6 +471,66 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     }
   }, [rpc])
 
+  const loadModels = useCallback(async (provider: SubscriptionProvider): Promise<void> => {
+    if (rpc === undefined) return
+    setTestModelsLoading(prev => ({ ...prev, [provider]: true }))
+    setTestModelsErrors((prev) => {
+      const next = { ...prev }
+      delete next[provider]
+      return next
+    })
+    try {
+      const response = await callSubscriptionsAuth<{ models: ModelInfoResult[] }>(rpc, 'models', { provider })
+      if (!mountedRef.current) return
+      setTestModels(prev => ({ ...prev, [provider]: response.models }))
+      if (response.models.length > 0) {
+        setSelectedModels((prev) => {
+          if (prev[provider] && response.models.some(m => m.id === prev[provider])) return prev
+          return { ...prev, [provider]: response.models[0].id }
+        })
+      }
+    } catch (error) {
+      if (mountedRef.current) {
+        setTestModelsErrors(prev => ({ ...prev, [provider]: messageOf(error) }))
+      }
+    } finally {
+      if (mountedRef.current) {
+        setTestModelsLoading(prev => ({ ...prev, [provider]: false }))
+      }
+    }
+  }, [rpc])
+
+  const toggleTest = useCallback((provider: SubscriptionProvider): void => {
+    setTestOpen((prev) => {
+      const nextOpen = !(prev[provider] === true)
+      if (nextOpen && testModels[provider] === undefined && testModelsLoading[provider] !== true) {
+        void loadModels(provider)
+      }
+      return { ...prev, [provider]: nextOpen }
+    })
+  }, [loadModels, testModels, testModelsLoading])
+
+  const runTest = useCallback(async (provider: SubscriptionProvider): Promise<void> => {
+    if (rpc === undefined) return
+    const model = selectedModels[provider]
+    if (!model) return
+    setTestResults(prev => ({ ...prev, [provider]: { status: 'testing' } }))
+    try {
+      const result = await callSubscriptionsAuth<TestConnectivityResult>(rpc, 'testConnectivity', { provider, model })
+      if (!mountedRef.current) return
+      setTestResults(prev => ({
+        ...prev,
+        [provider]: { status: 'success', latencyMs: result.latencyMs },
+      }))
+    } catch (error) {
+      if (!mountedRef.current) return
+      setTestResults(prev => ({
+        ...prev,
+        [provider]: { status: 'error', error: messageOf(error) },
+      }))
+    }
+  }, [rpc, selectedModels])
+
   // Fetch usage once a provider is logged in; drop the cached snapshot on
   // logout so a re-login refetches. A failed lookup does not auto-retry — the
   // per-card Refresh button is the retry path.
@@ -438,20 +540,44 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       if (status === undefined) continue
       if (status.loggedIn) {
         if (usages[id] === undefined && usageErrors[id] === undefined) void loadUsage(id)
-      } else if (usages[id] !== undefined || usageErrors[id] !== undefined) {
-        setUsages((prev) => {
-          const next = { ...prev }
-          delete next[id]
-          return next
-        })
-        setUsageErrors((prev) => {
-          const next = { ...prev }
-          delete next[id]
-          return next
-        })
+      } else {
+        if (usages[id] !== undefined || usageErrors[id] !== undefined) {
+          setUsages((prev) => {
+            const next = { ...prev }
+            delete next[id]
+            return next
+          })
+          setUsageErrors((prev) => {
+            const next = { ...prev }
+            delete next[id]
+            return next
+          })
+        }
+        if (testOpen[id] || testModels[id] || testResults[id] || selectedModels[id]) {
+          setTestOpen((prev) => {
+            const next = { ...prev }
+            delete next[id]
+            return next
+          })
+          setTestModels((prev) => {
+            const next = { ...prev }
+            delete next[id]
+            return next
+          })
+          setTestResults((prev) => {
+            const next = { ...prev }
+            delete next[id]
+            return next
+          })
+          setSelectedModels((prev) => {
+            const next = { ...prev }
+            delete next[id]
+            return next
+          })
+        }
       }
     }
-  }, [statuses, usages, usageErrors, loadUsage])
+  }, [statuses, usages, usageErrors, loadUsage, testOpen, testModels, testResults, selectedModels])
 
   const login = useCallback(async (provider: SubscriptionProvider): Promise<void> => {
     if (rpc === undefined) return
@@ -478,7 +604,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     } catch (error) {
       setProviderError(provider, messageOf(error))
     }
-  }, [rpc, t, setProviderError, startPolling])
+  }, [rpc, t, setProviderError, startPolling, refresh])
 
   const cancel = useCallback(async (provider: SubscriptionProvider): Promise<void> => {
     if (rpc === undefined) return
@@ -577,11 +703,90 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 </button>
               )}
               {status?.loggedIn === true && !busy && loginActive[id] !== true && (
-                <button type="button" style={styles.button} onClick={() => { void logout(id, name) }}>
-                  {t('logout')}
-                </button>
+                <>
+                  <button
+                    type="button"
+                    style={styles.button}
+                    onClick={() => { toggleTest(id) }}
+                  >
+                    {t('testConnectivity')}
+                  </button>
+                  <button
+                    type="button"
+                    style={styles.button}
+                    onClick={() => { void logout(id, name) }}
+                  >
+                    {t('logout')}
+                  </button>
+                </>
               )}
             </div>
+            {status?.loggedIn === true && testOpen[id] === true && (
+              <div style={styles.testPanel}>
+                <div style={styles.testRow}>
+                  {testModelsLoading[id] === true ? (
+                    <p style={styles.statusLine}>{t('testLoadingModels')}</p>
+                  ) : testModelsErrors[id] !== undefined ? (
+                    <>
+                      <p style={styles.errorLine}>{testModelsErrors[id]}</p>
+                      <button
+                        type="button"
+                        style={styles.button}
+                        onClick={() => { void loadModels(id) }}
+                      >
+                        {t('usageRefresh')}
+                      </button>
+                    </>
+                  ) : (testModels[id] ?? []).length === 0 ? (
+                    <p style={styles.statusLine}>{t('testNoModels')}</p>
+                  ) : (
+                    <>
+                      <select
+                        style={styles.select}
+                        value={selectedModels[id] ?? ''}
+                        disabled={testResults[id]?.status === 'testing'}
+                        onChange={(e) => {
+                          const nextModel = e.target.value
+                          setSelectedModels(prev => ({ ...prev, [id]: nextModel }))
+                          setTestResults((prev) => {
+                            const next = { ...prev }
+                            delete next[id]
+                            return next
+                          })
+                        }}
+                      >
+                        {(testModels[id] ?? []).map(model => (
+                          <option key={model.id} value={model.id}>
+                            {model.name || model.id}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        style={{
+                          ...styles.button,
+                          ...testResults[id]?.status === 'testing' ? { opacity: 0.7, cursor: 'default' } : {},
+                        }}
+                        disabled={testResults[id]?.status === 'testing' || !selectedModels[id]}
+                        onClick={() => { void runTest(id) }}
+                      >
+                        {testResults[id]?.status === 'testing' ? t('testing') : t('testRun')}
+                      </button>
+                    </>
+                  )}
+                </div>
+                {testResults[id]?.status === 'success' && (
+                  <p style={{ ...styles.statusLine, color: 'var(--dsw-alias-state-success-primary)' }}>
+                    {t('testSuccess', { latencyMs: testResults[id]?.latencyMs ?? 0 })}
+                  </p>
+                )}
+                {testResults[id]?.status === 'error' && (
+                  <p style={styles.errorLine}>
+                    {t('testFailed', { message: testResults[id]?.error ?? '' })}
+                  </p>
+                )}
+              </div>
+            )}
             {showUsage && (
               <div style={styles.usage}>
                 <div style={styles.usageHeader}>

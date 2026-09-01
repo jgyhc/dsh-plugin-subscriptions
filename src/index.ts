@@ -10,8 +10,8 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { CallId, errorChain } from '@deepseek-ai/dsh-llm'
-import type { AdapterRegistrationHandle } from '@deepseek-ai/dsh-llm'
+import { CallId, createUserMessage, errorChain, LlmAdapter } from '@deepseek-ai/dsh-llm'
+import type { AdapterRegistrationHandle, GenerateOptions } from '@deepseek-ai/dsh-llm'
 // Type-only: activates the `ctx.tools` Context merge for the inject block.
 import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-tools'
@@ -24,9 +24,11 @@ import { registerAuthRpc } from './auth/rpc.js'
 import type {
   AuthController,
   ImageBytesResult,
+  ModelInfoResult,
   ProviderStatus,
   SpeedController,
   SpeedTier,
+  TestConnectivityResult,
   VideoBytesResult,
 } from './auth/rpc.js'
 import {
@@ -100,7 +102,7 @@ import { createImageGenerateTool } from './tools/image-generate.js'
 import { createVideoGenerateTool, videosDirectory } from './tools/video-generate.js'
 
 export type { ModelEntry, ProviderUsage, UsageWindow } from './providers/common.js'
-export type { ProviderStatus } from './auth/rpc.js'
+export type { ModelInfoResult, ProviderStatus, TestConnectivityResult } from './auth/rpc.js'
 export type { ClaudeSession, CodexSession, CursorSession, GrokSession, GeminiSession, ProviderId } from './auth/store.js'
 
 export const name = 'dsh-plugin-subscriptions'
@@ -239,6 +241,8 @@ class SubscriptionsAuthController implements AuthController {
     private readonly usageFetchers: UsageFetchers = {},
     /** Warning sink so a background exchange failure also lands in the host log. */
     private readonly onError: (provider: ProviderId, detail: string) => void = () => {},
+    /** Registered LLM adapters for model listing and connectivity testing. */
+    private readonly adapters: Map<ProviderId, LlmAdapter> = new Map(),
   ) {}
 
   usage(provider: ProviderId, signal: AbortSignal): Promise<ProviderUsage> {
@@ -411,6 +415,67 @@ class SubscriptionsAuthController implements AuthController {
     this.lastError.delete(provider)
     this.onAuthChanged(provider)
   }
+
+  async models(provider: ProviderId, _signal: AbortSignal): Promise<ModelInfoResult[]> {
+    const session = await getSession(provider)
+    if (session === undefined) {
+      throw new Error(`${provider} is not logged in`)
+    }
+    const adapter = this.adapters.get(provider)
+    if (adapter === undefined) {
+      throw new Error(`no adapter registered for provider "${provider}"`)
+    }
+    const list = await adapter.listModels(provider)
+    return list.map(m => ({
+      id: m.id,
+      name: m.name ?? m.id,
+      ...m.description === undefined ? {} : { description: m.description },
+    }))
+  }
+
+  async testConnectivity(provider: ProviderId, model: string, signal: AbortSignal): Promise<TestConnectivityResult> {
+    const session = await getSession(provider)
+    if (session === undefined) {
+      throw new Error(`${provider} is not logged in`)
+    }
+    const adapter = this.adapters.get(provider)
+    if (adapter === undefined) {
+      throw new Error(`no adapter registered for provider "${provider}"`)
+    }
+    const start = Date.now()
+    const options: GenerateOptions = {
+      provider,
+      model,
+      messages: [
+        createUserMessage({
+          content: [{ type: 'text', text: 'Hi' }],
+          source: { kind: 'user' },
+        }),
+      ],
+      maxTokens: 16,
+      signal,
+    }
+    let text = ''
+    let failure: string | undefined
+    for await (const chunk of adapter.stream(options)) {
+      if (chunk.type === 'text-delta') {
+        text += chunk.text
+      } else if (chunk.type === 'finish') {
+        if (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted') {
+          failure = chunk.reason.failure.message
+        }
+      }
+    }
+    if (failure !== undefined) {
+      throw new Error(failure)
+    }
+    const latencyMs = Math.max(1, Date.now() - start)
+    return {
+      ok: true,
+      latencyMs,
+      ...text.trim().length > 0 ? { text: text.trim() } : {},
+    }
+  }
 }
 
 /**
@@ -497,6 +562,7 @@ export function apply(ctx: Context, config: Config): void {
   // `toolNotFound` instead). The getter reads the live variable, so the
   // adapter — constructed before `tools` mounts — still resolves it later.
   let cursorExecuteMcpTool: ExecuteMcpTool | undefined
+  const adapters = new Map<ProviderId, LlmAdapter>()
 
   for (const provider of providers) {
     switch (provider) {
@@ -530,6 +596,7 @@ export function apply(ctx: Context, config: Config): void {
             && adapter.supportsFastTier(model),
         })
         codexAdapter = adapter
+        adapters.set('codex', adapter)
         handles.set('codex', ctx.llm.registerAdapter(['codex'], adapter))
         break
       }
@@ -546,7 +613,7 @@ export function apply(ctx: Context, config: Config): void {
         })
         claudeTokens = tokens
         usageFetchers.claude = async signal => fetchClaudeUsage(await tokens.session(), fetch, signal)
-        handles.set('claude', ctx.llm.registerAdapter(['claude'], new ClaudeAdapter({
+        const adapter = new ClaudeAdapter({
           models: catalog.claude,
           streamIdleTimeoutMs,
           tokens,
@@ -555,7 +622,9 @@ export function apply(ctx: Context, config: Config): void {
           maxRetries: 10,
           resolveAttachments,
           catalogStore: catalogStore('claude'),
-        })))
+        })
+        adapters.set('claude', adapter)
+        handles.set('claude', ctx.llm.registerAdapter(['claude'], adapter))
         break
       }
       case 'grok': {
@@ -571,7 +640,7 @@ export function apply(ctx: Context, config: Config): void {
         })
         grokTokens = tokens
         usageFetchers.grok = async signal => fetchGrokUsage(await tokens.session(), fetch, signal)
-        handles.set('grok', ctx.llm.registerAdapter(['grok'], new GrokAdapter({
+        const adapter = new GrokAdapter({
           models: catalog.grok,
           streamIdleTimeoutMs,
           tokens,
@@ -581,7 +650,9 @@ export function apply(ctx: Context, config: Config): void {
           // Durable catalog: capability metadata (reasoning efforts) survives
           // restarts, so a resumed session's selected effort keeps resolving.
           catalogStore: catalogStore('grok'),
-        })))
+        })
+        adapters.set('grok', adapter)
+        handles.set('grok', ctx.llm.registerAdapter(['grok'], adapter))
         break
       }
       case 'gemini': {
@@ -596,7 +667,7 @@ export function apply(ctx: Context, config: Config): void {
           onRemoved: () => { authChanged('gemini') },
         })
         usageFetchers.gemini = async signal => fetchGeminiUsage(await tokens.session(), fetch, signal)
-        handles.set('gemini', ctx.llm.registerAdapter(['gemini'], new GeminiAdapter({
+        const adapter = new GeminiAdapter({
           models: catalog.gemini,
           streamIdleTimeoutMs,
           tokens,
@@ -606,7 +677,9 @@ export function apply(ctx: Context, config: Config): void {
           // Durable catalog: capability metadata survives restarts, so a
           // resumed session's model keeps its discovered context window.
           catalogStore: catalogStore('gemini'),
-        })))
+        })
+        adapters.set('gemini', adapter)
+        handles.set('gemini', ctx.llm.registerAdapter(['gemini'], adapter))
         break
       }
       case 'cursor': {
@@ -621,7 +694,7 @@ export function apply(ctx: Context, config: Config): void {
           onRemoved: () => { authChanged('cursor') },
         })
         usageFetchers.cursor = async signal => fetchCursorUsage(await tokens.session(), fetch, signal)
-        handles.set('cursor', ctx.llm.registerAdapter(['cursor'], new CursorAdapter({
+        const adapter = new CursorAdapter({
           models: catalog.cursor,
           streamIdleTimeoutMs,
           tokens,
@@ -633,7 +706,9 @@ export function apply(ctx: Context, config: Config): void {
           // Native execs default their working directory to the session's
           // validated cwd so tools run in the session workspace.
           resolveSessionCwd: (sessionId: string | undefined) => sessionCwd(ctx, sessionId),
-        })))
+        })
+        adapters.set('cursor', adapter)
+        handles.set('cursor', ctx.llm.registerAdapter(['cursor'], adapter))
         break
       }
     }
@@ -659,6 +734,7 @@ export function apply(ctx: Context, config: Config): void {
     (provider, detail) => {
       ctx.logger.warn(`dsh-plugin-subscriptions: ${provider} login failed: ${detail}`)
     },
+    adapters,
   ), speed)
 
   // Proactively keep the Claude session synced with Claude Code's own store
