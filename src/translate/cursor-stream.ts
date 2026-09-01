@@ -70,6 +70,7 @@ export interface StreamParseState {
   textBuffer: string
   reasoningIndex?: number
   reasoningBuffer: string
+  reasoningStepEnded?: boolean
   outputTokens: number
 }
 
@@ -102,6 +103,7 @@ export function endReasoningBlock(state: StreamParseState, push: (chunk: StreamC
   push({ type: 'block-end', index, block: { type: 'reasoning', text: state.reasoningBuffer } })
   delete state.reasoningIndex
   state.reasoningBuffer = ''
+  delete state.reasoningStepEnded
 }
 
 export function pushReasoningDelta(state: StreamParseState, push: (chunk: StreamChunk) => void, delta: string): void {
@@ -111,6 +113,14 @@ export function pushReasoningDelta(state: StreamParseState, push: (chunk: Stream
     state.reasoningBuffer = ''
     push({ type: 'block-start', index: state.reasoningIndex, blockType: 'reasoning' })
   }
+  if (state.reasoningStepEnded && state.reasoningBuffer.length > 0) {
+    const sep = state.reasoningBuffer.endsWith('\n\n') ? '' : state.reasoningBuffer.endsWith('\n') ? '\n' : '\n\n'
+    if (sep.length > 0) {
+      state.reasoningBuffer += sep
+      push({ type: 'reasoning-delta', index: state.reasoningIndex, text: sep })
+    }
+  }
+  state.reasoningStepEnded = false
   state.reasoningBuffer += delta
   push({ type: 'reasoning-delta', index: state.reasoningIndex, text: delta })
 }
@@ -130,7 +140,7 @@ export function processInteractionUpdate(
     const delta = typeof value.text === 'string' ? value.text : ''
     pushReasoningDelta(state, push, delta)
   } else if (updateCase === 'thinkingCompleted') {
-    endReasoningBlock(state, push)
+    state.reasoningStepEnded = true
   } else if (updateCase === 'tokenDelta') {
     const tokens = typeof value.tokens === 'number' && Number.isFinite(value.tokens) ? value.tokens : 0
     state.outputTokens += tokens

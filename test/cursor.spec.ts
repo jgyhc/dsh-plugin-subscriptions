@@ -14,6 +14,8 @@ import {
 } from '../src/translate/cursor-request.js'
 import {
   createStreamState,
+  endReasoningBlock,
+  endTextBlock,
   processInteractionUpdate,
 } from '../src/translate/cursor-stream.js'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -357,7 +359,7 @@ test('fetchCursorUsage hits auth/usage and optional summary', async () => {
   assert.ok(calls.some(call => urlIs(CURSOR_API_USAGE_SUMMARY_URL, call.url)))
 })
 
-test('processInteractionUpdate handles multiple separate thinking blocks without repeating text', () => {
+test('processInteractionUpdate unifies multiple thinking steps into a single reasoning block', () => {
   const state = createStreamState()
   const chunks: StreamChunk[] = []
   const push = (chunk: StreamChunk): void => {
@@ -381,27 +383,27 @@ test('processInteractionUpdate handles multiple separate thinking blocks without
   processInteractionUpdate({ message: { case: 'thinkingDelta', value: { text: 'Thought 3 delta.' } } }, state, push)
   processInteractionUpdate({ message: { case: 'thinkingCompleted', value: {} } }, state, push)
 
-  const blockEnds = chunks.filter(c => c.type === 'block-end')
-  assert.equal(blockEnds.length, 3)
+  // End blocks as stream completion does
+  endTextBlock(state, push)
+  endReasoningBlock(state, push)
 
-  // Block 0: only Thought 1
-  assert.deepEqual(blockEnds[0], {
+  const blockEnds = chunks.filter(c => c.type === 'block-end')
+  assert.equal(blockEnds.length, 2)
+
+  // Block 1: text block
+  assert.deepEqual(blockEnds.find(b => b.type === 'block-end' && b.block.type === 'text'), {
+    type: 'block-end',
+    index: 1,
+    block: { type: 'text', text: 'Some text response' },
+  })
+
+  // Block 0: single unified reasoning block containing all thought steps cleanly separated
+  assert.deepEqual(blockEnds.find(b => b.type === 'block-end' && b.block.type === 'reasoning'), {
     type: 'block-end',
     index: 0,
-    block: { type: 'reasoning', text: 'Thought 1 delta A. Thought 1 delta B.' },
-  })
-
-  // Block 2: only Thought 2, NOT Thought 1 + Thought 2
-  assert.deepEqual(blockEnds[1], {
-    type: 'block-end',
-    index: 2,
-    block: { type: 'reasoning', text: 'Thought 2 delta A. Thought 2 delta B.' },
-  })
-
-  // Block 3: only Thought 3
-  assert.deepEqual(blockEnds[2], {
-    type: 'block-end',
-    index: 3,
-    block: { type: 'reasoning', text: 'Thought 3 delta.' },
+    block: {
+      type: 'reasoning',
+      text: 'Thought 1 delta A. Thought 1 delta B.\n\nThought 2 delta A. Thought 2 delta B.\n\nThought 3 delta.',
+    },
   })
 })
