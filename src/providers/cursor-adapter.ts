@@ -15,7 +15,7 @@ import type { CursorSession } from '../auth/store.js'
 import { resolveImages } from '../translate/resolved.js'
 import { fetchCursorModels } from '../translate/cursor-request.js'
 import { streamCursor } from '../translate/cursor-stream.js'
-import type { ExecuteMcpTool } from '../translate/cursor-native-exec.js'
+import type { ExecuteMcpTool, NativeExecProgress } from '../translate/cursor-native-exec.js'
 import {
   idleWatchdog,
   mapFetchFailure,
@@ -56,6 +56,11 @@ export interface CursorAdapterOptions {
    * cwd when unset or unresolved.
    */
   resolveSessionCwd?: (sessionId: string | undefined) => string | undefined
+  /**
+   * Resolves a display-only tool-card reporter for the current harness session
+   * so native Cursor execs appear as Grep/Read/Write cards in the GUI.
+   */
+  resolveExecProgress?: (sessionId: string | undefined) => NativeExecProgress | undefined
 }
 
 /** Cursor wire adapter: one instance serves the `cursor` provider route. */
@@ -177,6 +182,12 @@ export class CursorAdapter extends LlmAdapter {
       ...(this.options.baseUrl === undefined ? {} : { baseUrl: this.options.baseUrl }),
       ...(this.options.executeMcpTool === undefined ? {} : { executeMcpTool: this.options.executeMcpTool }),
       ...(cwd === undefined ? {} : { cwd }),
+      ...(this.options.resolveExecProgress === undefined
+        ? {}
+        : (() => {
+            const progress = this.options.resolveExecProgress(options.sessionId)
+            return progress === undefined ? {} : { progress }
+          })()),
     })
   }
 }

@@ -117,6 +117,21 @@ export interface NativeToolOutcome {
 /** Harness-registry-backed executor for MCP tool calls. */
 export type ExecuteMcpTool = (input: NativeToolInput) => Promise<NativeToolOutcome>
 
+/** Display-only reporter for one native exec (harness tool cards). */
+export interface NativeExecProgress {
+  start(presentation: {
+    callId: string
+    name: string
+    arguments: Record<string, unknown>
+  }): Promise<number | undefined>
+  finish(
+    callId: string,
+    started: Promise<number | undefined>,
+    text: string,
+    isError: boolean,
+  ): void
+}
+
 /** Per-exec context: cancellation plus the optional harness MCP executor. */
 export interface NativeExecContext {
   signal: AbortSignal
@@ -126,6 +141,15 @@ export interface NativeExecContext {
    */
   cwd?: string
   executeMcpTool?: ExecuteMcpTool
+  /** Optional harness session reporter so the GUI can show live tool cards. */
+  progress?: NativeExecProgress
+  /**
+   * Turn-local log of successful write/delete paths, used to append a
+   * "Modified files" list at the end of the Cursor stream.
+   */
+  fileChanges?: {
+    record(change: { path: string; kind: 'write' | 'delete' }): void
+  }
 }
 
 /** Decode `google.protobuf.Value`-encoded MCP args into plain JSON. */

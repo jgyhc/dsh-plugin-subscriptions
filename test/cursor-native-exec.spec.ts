@@ -35,8 +35,22 @@ import {
   execWrite,
   type ExecuteMcpTool,
   type NativeExecContext,
+  type NativeExecProgress,
 } from '../src/translate/cursor-native-exec.js'
-import { handleExecServerMessage } from '../src/translate/cursor-stream.js'
+import {
+  createCursorSessionProgress,
+  createFileChangeLog,
+  cursorExecOutcome,
+  fileChangeFromExec,
+  formatModifiedFilesList,
+  presentCursorExec,
+} from '../src/translate/cursor-exec-progress.js'
+import {
+  createStreamState,
+  handleExecServerMessage,
+  pushModifiedFilesList,
+} from '../src/translate/cursor-stream.js'
+import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 
 const signal = (): AbortSignal => new AbortController().signal
 
@@ -414,13 +428,21 @@ test('execMcp surfaces tool failures as an isError success', async () => {
 // handleExecServerMessage wiring
 // ---------------------------------------------------------------------------
 
-async function runExec(execMsg: ExecServerMessage, executeMcpTool?: ExecuteMcpTool, cwd?: string): Promise<{
+async function runExec(
+  execMsg: ExecServerMessage,
+  executeMcpTool?: ExecuteMcpTool,
+  cwd?: string,
+  progress?: NativeExecProgress,
+  fileChanges?: NativeExecContext['fileChanges'],
+): Promise<{
   fake: FakeH2Request
 }> {
   const fake = new FakeH2Request()
   const nativeExec: NativeExecContext = {
     signal: signal(),
     ...(cwd === undefined ? {} : { cwd }),
+    ...(progress === undefined ? {} : { progress }),
+    ...(fileChanges === undefined ? {} : { fileChanges }),
   }
   await handleExecServerMessage(
     execMsg,
@@ -597,4 +619,219 @@ test('handleExecServerMessage throws for unsupported exec cases', async () => {
   assert.equal(decoded.message.case, 'execClientControlMessage')
   const control = decoded.message.value as { message?: { case?: string } }
   assert.equal(control.message?.case, 'throw')
+})
+
+test('presentCursorExec maps grep/read/write/edit onto harness tool cards', () => {
+  const grep = create(ExecServerMessageSchema, {
+    id: 1,
+    execId: 'e1',
+    message: { case: 'grepArgs', value: create(GrepArgsSchema, { pattern: 'Foo|Bar', path: '/tmp', toolCallId: 'g1' }) },
+  })
+  assert.deepEqual(presentCursorExec(grep), {
+    callId: 'g1',
+    name: 'grep',
+    arguments: { pattern: 'Foo|Bar', path: '/tmp' },
+  })
+  const read = create(ExecServerMessageSchema, {
+    id: 2,
+    execId: 'e2',
+    message: { case: 'readArgs', value: create(ReadArgsSchema, { path: '/tmp/a.ts', toolCallId: 'r1' }) },
+  })
+  assert.deepEqual(presentCursorExec(read), {
+    callId: 'r1',
+    name: 'read',
+    arguments: { file_path: '/tmp/a.ts' },
+  })
+  const write = create(ExecServerMessageSchema, {
+    id: 3,
+    execId: 'e3',
+    message: {
+      case: 'writeArgs',
+      value: create(WriteArgsSchema, { path: '/tmp/a.ts', fileText: 'huge', toolCallId: 'w1' }),
+    },
+  })
+  assert.deepEqual(presentCursorExec(write), {
+    callId: 'w1',
+    name: 'write',
+    arguments: { file_path: '/tmp/a.ts' },
+  })
+})
+
+test('handleExecServerMessage reports live grep progress to the harness session', async () => {
+  const dir = await tempDir()
+  await writeFile(join(dir, 'g.txt'), 'alpha\n')
+  const events: Array<{ type: string; data?: { turn?: number; step?: number } }> = [
+    { type: 'turn/start', data: { turn: 1 } },
+    { type: 'step/start', data: { turn: 1, step: 1 } },
+  ]
+  const appended: Array<{ type: string; data: Record<string, unknown> }> = []
+  const session = {
+    events,
+    append(type: string, data: unknown) {
+      const event = { type, data: data as { turn?: number; step?: number } }
+      events.push(event)
+      appended.push({ type, data: data as Record<string, unknown> })
+      return { seq: events.length - 1 }
+    },
+  }
+  const progress = createCursorSessionProgress(session)
+  const grepMsg = create(ExecServerMessageSchema, {
+    id: 3,
+    execId: 'exec-grep',
+    message: { case: 'grepArgs', value: create(GrepArgsSchema, { pattern: 'alpha', path: dir, toolCallId: 'tc-grep' }) },
+  })
+  await runExec(grepMsg, undefined, undefined, progress)
+  await waitFor(() => appended.some(event => event.type === 'tool/result'))
+  const call = appended.find(event => event.type === 'tool/call')
+  const result = appended.find(event => event.type === 'tool/result')
+  assert.equal(call?.data.name, 'grep')
+  assert.equal(call?.data.callId, 'tc-grep')
+  assert.match(String(call?.data.arguments), /alpha/)
+  assert.equal(result?.data.turn, 1)
+  assert.equal(result?.data.step, 1)
+  const resultMsg = result?.data.message as { content?: Array<{ content?: Array<{ text?: string }> }> } | undefined
+  const contentText = resultMsg?.content?.[0]?.content?.[0]?.text
+  assert.match(String(contentText), /alpha/)
+})
+
+test('cursorExecOutcome extracts human-readable text from McpSuccess with nested content', () => {
+  const mcpSuccessValue = {
+    $typeName: 'agent.v1.McpSuccess',
+    content: [
+      {
+        $typeName: 'agent.v1.McpToolResultContentItem',
+        content: {
+          case: 'text',
+          value: {
+            $typeName: 'agent.v1.McpTextContent',
+            text: 'Error: MemoryOS tools require a Harness agent/session execution context',
+          },
+        },
+      },
+    ],
+    isError: true,
+  }
+  const outcome = cursorExecOutcome({
+    message: {
+      case: 'mcpResult',
+      value: {
+        result: {
+          case: 'success',
+          value: mcpSuccessValue,
+        },
+      },
+    } as never,
+    localExecutionTimeMs: 10,
+  })
+  assert.equal(outcome.isError, true)
+  assert.equal(outcome.text, 'Error: MemoryOS tools require a Harness agent/session execution context')
+})
+
+
+test('formatModifiedFilesList collapses paths and relativizes to cwd', () => {
+  assert.equal(formatModifiedFilesList([]), '')
+  const cwd = '/tmp/proj'
+  const text = formatModifiedFilesList([
+    { path: '/tmp/proj/src/a.ts', kind: 'write' },
+    { path: '/tmp/proj/src/a.ts', kind: 'write' },
+    { path: '/tmp/proj/src/b.ts', kind: 'write' },
+    { path: '/tmp/proj/src/b.ts', kind: 'delete' },
+    { path: '/elsewhere/c.ts', kind: 'write' },
+  ], cwd)
+  assert.equal(
+    text,
+    [
+      'Modified files:',
+      '',
+      '- `src/a.ts`',
+      '- `src/b.ts` (deleted)',
+      '- `/elsewhere/c.ts`',
+    ].join('\n'),
+  )
+})
+
+test('fileChangeFromExec maps write/delete and ignores errors', () => {
+  const write = create(ExecServerMessageSchema, {
+    id: 1,
+    execId: 'w',
+    message: {
+      case: 'writeArgs',
+      value: create(WriteArgsSchema, { path: '/tmp/a.ts', fileText: 'x', toolCallId: 'tc' }),
+    },
+  })
+  assert.deepEqual(fileChangeFromExec(write, false), { path: '/tmp/a.ts', kind: 'write' })
+  assert.equal(fileChangeFromExec(write, true), undefined)
+  const del = create(ExecServerMessageSchema, {
+    id: 2,
+    execId: 'd',
+    message: {
+      case: 'deleteArgs',
+      value: create(DeleteArgsSchema, { path: '/tmp/a.ts', toolCallId: 'tc' }),
+    },
+  })
+  assert.deepEqual(fileChangeFromExec(del, false), { path: '/tmp/a.ts', kind: 'delete' })
+  const grep = create(ExecServerMessageSchema, {
+    id: 3,
+    execId: 'g',
+    message: { case: 'grepArgs', value: create(GrepArgsSchema, { pattern: 'x', path: '/tmp', toolCallId: 'tc' }) },
+  })
+  assert.equal(fileChangeFromExec(grep, false), undefined)
+})
+
+test('handleExecServerMessage records successful write and delete, not failures', async () => {
+  const dir = await tempDir()
+  const log = createFileChangeLog()
+  const written = join(dir, 'kept.ts')
+  const writeMsg = create(ExecServerMessageSchema, {
+    id: 21,
+    execId: 'exec-write-log',
+    message: {
+      case: 'writeArgs',
+      value: create(WriteArgsSchema, { path: written, fileText: 'ok\n', toolCallId: 'tc' }),
+    },
+  })
+  await runExec(writeMsg, undefined, dir, undefined, log)
+  const missing = join(dir, 'missing.ts')
+  const failDelete = create(ExecServerMessageSchema, {
+    id: 22,
+    execId: 'exec-del-miss',
+    message: {
+      case: 'deleteArgs',
+      value: create(DeleteArgsSchema, { path: missing, toolCallId: 'tc' }),
+    },
+  })
+  await runExec(failDelete, undefined, dir, undefined, log)
+  const gone = join(dir, 'gone.ts')
+  await writeFile(gone, 'bye\n')
+  const delMsg = create(ExecServerMessageSchema, {
+    id: 23,
+    execId: 'exec-del-ok',
+    message: {
+      case: 'deleteArgs',
+      value: create(DeleteArgsSchema, { path: gone, toolCallId: 'tc' }),
+    },
+  })
+  await runExec(delMsg, undefined, dir, undefined, log)
+  assert.deepEqual(log.list(), [
+    { path: written, kind: 'write' },
+    { path: gone, kind: 'delete' },
+  ])
+})
+
+test('pushModifiedFilesList emits a trailing text block', () => {
+  const state = createStreamState()
+  const chunks: StreamChunk[] = []
+  pushModifiedFilesList(state, chunk => { chunks.push(chunk) }, [
+    { path: '/tmp/proj/a.ts', kind: 'write' },
+  ], '/tmp/proj')
+  const ended = chunks.filter(chunk => chunk.type === 'block-end')
+  assert.equal(ended.length, 1)
+  assert.equal(ended[0]?.type, 'block-end')
+  if (ended[0]?.type !== 'block-end') return
+  assert.deepEqual(ended[0].block, {
+    type: 'text',
+    text: 'Modified files:\n\n- `a.ts`',
+  })
+  pushModifiedFilesList(state, chunk => { chunks.push(chunk) }, [])
+  assert.equal(chunks.filter(chunk => chunk.type === 'block-end').length, 1)
 })

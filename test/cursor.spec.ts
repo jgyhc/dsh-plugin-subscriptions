@@ -5,6 +5,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { CallId } from '@deepseek-ai/dsh-llm'
 
 import {
   buildCursorRequestContextRules,
@@ -290,6 +291,31 @@ test('buildCursorRunRequest encodes a user turn with MCP tools and rules', () =>
   assert.ok(built.requestBytes.byteLength > 0)
   assert.equal(built.mcpTools.length, 1)
   assert.equal(built.rules.length, 1)
+})
+
+test('buildCursorRunRequest keeps the assistant turn when display-only tool results sit in between', () => {
+  resetCursorConversationCache()
+  const built = buildCursorRunRequest({
+    model: 'composer-2.5',
+    sessionId: 'sess-tools',
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: 'align fields' }] },
+      {
+        role: 'user',
+        content: [{
+          type: 'tool-result',
+          toolCallId: CallId('tc-grep'),
+          content: [{ type: 'text', text: 'matches' }],
+        }],
+      },
+      { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+      { role: 'user', content: [{ type: 'text', text: 'next' }] },
+    ],
+  })
+  assert.ok(built.requestBytes.byteLength > 0)
+  assert.equal(built.conversationState.turns.length, 1)
+  const blobs = [...built.blobStore.values()].map(bytes => Buffer.from(bytes).toString('utf8'))
+  assert.ok(blobs.some(text => text.includes('done')), 'assistant text must stay in the reconstructed Cursor turn')
 })
 
 test('CursorAdapter listModels returns [] when logged out', async () => {

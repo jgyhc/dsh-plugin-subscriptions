@@ -116,9 +116,14 @@ function toolResultText(block: { content: readonly { type: string; text?: string
   return block.content.map(part => (part.type === 'text' ? part.text ?? '' : '')).join('')
 }
 
+function isToolResultOnly(message: TranslatableMessage): boolean {
+  return message.content.length > 0 && message.content.every(block => block.type === 'tool-result')
+}
+
 function findLastUserMessageIndex(messages: readonly TranslatableMessage[]): number {
   for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]?.role === 'user') return i
+    const message = messages[i]
+    if (message?.role === 'user' && !isToolResultOnly(message)) return i
   }
   return -1
 }
@@ -263,12 +268,17 @@ function buildRootPromptMessagesJson(
           parts.push({ type: 'image', image: `data:${block.mediaType};base64,${block.dataBase64}`, mediaType: block.mediaType })
         }
         if (block.type === 'tool-result') {
+          // Display-only Cursor native execs have no matching assistant tool-call
+          // in harness history; echoing them into the next Run prompt would
+          // duplicate Cursor's own conversation checkpoint.
+          const toolName = toolNames.get(String(block.toolCallId))
+          if (toolName === undefined) continue
           pushJson({
             role: 'tool',
             id: String(block.toolCallId),
             content: [{
               type: 'tool-result',
-              toolName: toolNames.get(String(block.toolCallId)) ?? String(block.toolCallId),
+              toolName,
               toolCallId: String(block.toolCallId),
               result: toolResultText(block),
               ...(block.isError === true ? { isError: true } : {}),
@@ -363,8 +373,7 @@ function buildConversationTurns(
       continue
     }
     if (i === activeUserMessageIndex) break
-    const hasToolResultOnly = msg.content.every(block => block.type === 'tool-result')
-    if (hasToolResultOnly) {
+    if (isToolResultOnly(msg)) {
       i++
       continue
     }
@@ -377,9 +386,16 @@ function buildConversationTurns(
     const userMessageBlobId = storeCursorBlob(blobStore, toBinary(UserMessageSchema, userMessage))
     const stepBlobIds: Uint8Array[] = []
     i++
-    while (i < messages.length && messages[i]?.role !== 'user') {
+    while (i < messages.length) {
       const stepMsg = messages[i]
       if (stepMsg === undefined) break
+      if (stepMsg.role === 'user') {
+        if (isToolResultOnly(stepMsg)) {
+          i++
+          continue
+        }
+        break
+      }
       if (stepMsg.role === 'assistant') {
         for (const item of stepMsg.content) {
           if (item.type === 'text' && item.text.length > 0) {

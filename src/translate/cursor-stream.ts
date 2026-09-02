@@ -44,8 +44,16 @@ import {
   execWrite,
   type ExecuteMcpTool,
   type NativeExecContext,
+  type NativeExecProgress,
   type NativeExecResult,
 } from './cursor-native-exec.js'
+import {
+  createFileChangeLog,
+  cursorExecOutcome,
+  fileChangeFromExec,
+  formatModifiedFilesList,
+  presentCursorExec,
+} from './cursor-exec-progress.js'
 import { CURSOR_API_URL } from '../providers/cursor.js'
 import type { CursorSession } from '../auth/store.js'
 import { handleInteractionQuery } from './cursor-interaction.js'
@@ -235,8 +243,10 @@ function handleKvServerMessage(
 /**
  * Execute one Cursor exec message natively and send the matching result back
  * on the Connect stream. The Cursor cloud agent drives its own tool loop, so
- * results are relayed directly rather than surfaced as harness tool calls;
- * execution runs in the background and results are correlated by `execMsg.id`,
+ * results are relayed on Connect rather than dispatched by the harness loop.
+ * Display-only `tool/call` / `tool/result` events are appended when a session
+ * progress reporter is present, so the GUI can show Grep/Read/Write cards live.
+ * Execution runs in the background and results are correlated by `execMsg.id`,
  * so out-of-order completion is fine.
  *
  * Exported for tests.
@@ -268,7 +278,15 @@ export async function handleExecServerMessage(
   }
 
   // Every remaining case runs a tool: send the shaped result once the native
-  // executor settles. The tool call itself stays internal to the Cursor agent.
+  // executor settles. Display-only tool cards are logged beside that reply.
+  const presented = presentCursorExec(execMsg)
+  const started = presented !== undefined && nativeExec.progress !== undefined
+    ? nativeExec.progress.start(presented)
+    : undefined
+  const finishProgress = (text: string, isError: boolean): void => {
+    if (presented === undefined || started === undefined || nativeExec.progress === undefined) return
+    nativeExec.progress.finish(presented.callId, started, text, isError)
+  }
   const runResult = (run: () => Promise<NativeExecResult>): void => {
     void run().then(outcome => {
       sendExecClientMessage(
@@ -278,15 +296,23 @@ export async function handleExecServerMessage(
         outcome.message.value,
         outcome.localExecutionTimeMs,
       )
+      const summary = cursorExecOutcome(outcome)
+      finishProgress(summary.text, summary.isError)
+      const change = fileChangeFromExec(execMsg, summary.isError)
+      if (change !== undefined) nativeExec.fileChanges?.record(change)
     }).catch(error => {
-      sendExecClientThrow(h2Request, execMsg, errorMessage(error))
+      const message = errorMessage(error)
+      sendExecClientThrow(h2Request, execMsg, message)
+      finishProgress(message, true)
     })
   }
   const runStream = (stream: (send: (message: ShellStream) => void) => Promise<void>): void => {
     void stream(message => {
       sendExecClientMessage(h2Request, execMsg, 'shellStream', message)
     }).catch(error => {
-      sendExecClientThrow(h2Request, execMsg, errorMessage(error))
+      const message = errorMessage(error)
+      sendExecClientThrow(h2Request, execMsg, message)
+      finishProgress(message, true)
     })
   }
 
@@ -323,6 +349,11 @@ export async function handleExecServerMessage(
           // exec frame's completion so the agent can move on and finish.
           sendExecClientMessage(h2Request, execMsg, 'shellResult', result, localExecutionTimeMs)
           sendExecClientStreamClose(h2Request, execMsg)
+          const summary = cursorExecOutcome({
+            message: { case: 'shellResult', value: result },
+            localExecutionTimeMs,
+          })
+          finishProgress(summary.text, summary.isError)
         },
       ))
       return
@@ -353,13 +384,11 @@ export async function handleExecServerMessage(
       return
     }
   }
-  sendExecClientThrow(
-    h2Request,
-    execMsg,
-    execCase === undefined
-      ? 'Unknown Cursor exec message variant'
-      : `Cursor native exec "${execCase}" is not supported by dsh-plugin-subscriptions`,
-  )
+  const unsupported = execCase === undefined
+    ? 'Unknown Cursor exec message variant'
+    : `Cursor native exec "${execCase}" is not supported by dsh-plugin-subscriptions`
+  sendExecClientThrow(h2Request, execMsg, unsupported)
+  finishProgress(unsupported, true)
 }
 
 function errorMessage(error: unknown): string {
@@ -390,13 +419,42 @@ function buildNativeExecContext(
   resolveExecuteMcpTool: (() => ExecuteMcpTool | undefined) | undefined,
   signal: AbortSignal | undefined,
   cwd: string | undefined,
+  progress: NativeExecProgress | undefined,
+  onToolActivity?: () => void,
+  fileChanges?: NativeExecContext['fileChanges'],
 ): NativeExecContext {
   const executeMcpTool = resolveExecuteMcpTool?.()
+  const wrappedProgress: NativeExecProgress | undefined = progress !== undefined
+    ? {
+      start(presentation) {
+        onToolActivity?.()
+        return progress.start(presentation)
+      },
+      finish(callId, started, text, isError) {
+        progress.finish(callId, started, text, isError)
+      },
+    }
+    : undefined
   return {
     signal: signal ?? new AbortController().signal,
     ...(cwd === undefined ? {} : { cwd }),
     ...(executeMcpTool === undefined ? {} : { executeMcpTool }),
+    ...(wrappedProgress === undefined ? {} : { progress: wrappedProgress }),
+    ...(fileChanges === undefined ? {} : { fileChanges }),
   }
+}
+
+/** Append a trailing text block listing files this turn wrote or deleted. */
+export function pushModifiedFilesList(
+  state: StreamParseState,
+  push: (chunk: StreamChunk) => void,
+  changes: Parameters<typeof formatModifiedFilesList>[0],
+  cwd?: string,
+): void {
+  const text = formatModifiedFilesList(changes, cwd)
+  if (text.length === 0) return
+  pushTextDelta(state, push, text)
+  endTextBlock(state, push)
 }
 
 function handleServerMessage(
@@ -418,6 +476,7 @@ function handleServerMessage(
   if (msgCase === 'kvServerMessage') {
     handleKvServerMessage(msg.message.value as KvServerMessage, blobStore, h2Request)
   } else if (msgCase === 'execServerMessage') {
+    endTextBlock(state, push)
     dispatchExecServerMessage(
       msg.message.value as ExecServerMessage,
       h2Request,
@@ -450,6 +509,8 @@ export interface CursorStreamOptions extends BuildCursorRunOptions {
    * `tools` service is mounted. Resolved once per stream.
    */
   executeMcpTool?: () => ExecuteMcpTool | undefined
+  /** Display-only harness tool-card reporter for native Cursor execs. */
+  progress?: NativeExecProgress
 }
 
 const HEARTBEAT_INTERVAL_MS = 5_000
@@ -506,7 +567,18 @@ async function* streamCursorOnce(
   }
 
   const parseState = createStreamState()
-  const nativeExec = buildNativeExecContext(options.executeMcpTool, options.signal, options.cwd)
+  const fileChanges = createFileChangeLog()
+  const nativeExec = buildNativeExecContext(
+    options.executeMcpTool,
+    options.signal,
+    options.cwd,
+    options.progress,
+    () => {
+      // Whenever a native tool starts, notify activity to reset the watchdog timer
+      options.onActivity?.()
+    },
+    fileChanges,
+  )
   let sawTurnEnded = false
 
   const baseUrl = options.baseUrl ?? CURSOR_API_URL
@@ -634,6 +706,7 @@ async function* streamCursorOnce(
 
   endTextBlock(parseState, push)
   endReasoningBlock(parseState, push)
+  pushModifiedFilesList(parseState, push, fileChanges.list(), options.cwd)
   while (queue.length > 0) yield queue.shift()!
 
   if (parseState.outputTokens > 0) {

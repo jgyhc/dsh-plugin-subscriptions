@@ -97,6 +97,8 @@ import {
 } from './providers/cursor.js'
 import { CursorAdapter } from './providers/cursor-adapter.js'
 import type { ExecuteMcpTool, NativeToolOutcome } from './translate/cursor-native-exec.js'
+import { createCursorSessionProgress } from './translate/cursor-exec-progress.js'
+import type { CursorProgressSession } from './translate/cursor-exec-progress.js'
 import { createXSearchTool } from './tools/x-search.js'
 import { createImageGenerateTool } from './tools/image-generate.js'
 import { createVideoGenerateTool, videosDirectory } from './tools/video-generate.js'
@@ -484,11 +486,23 @@ class SubscriptionsAuthController implements AuthController {
  * `pwd`/`ls`/bare greps land in the session workspace instead of the plugin
  * process's directory.
  */
+type SessionStoreLike = {
+  get(id: string): (CursorProgressSession & { header?: { cwd?: string } }) | undefined
+}
+
+function sessionStore(ctx: Context): SessionStoreLike | undefined {
+  return ctx.get('sessions') as SessionStoreLike | undefined
+}
+
 function sessionCwd(ctx: Context, sessionId: string | undefined): string | undefined {
   if (sessionId === undefined) return undefined
-  const store = ctx.get('sessions') as { get(id: string): { header?: { cwd?: string } } | undefined } | undefined
-  const cwd = store?.get(sessionId)?.header?.cwd
+  const cwd = sessionStore(ctx)?.get(sessionId)?.header?.cwd
   return cwd !== undefined && cwd.length > 0 ? cwd : undefined
+}
+
+function sessionExecProgress(ctx: Context, sessionId: string | undefined) {
+  if (sessionId === undefined) return undefined
+  return createCursorSessionProgress(sessionStore(ctx)?.get(sessionId))
 }
 
 /**
@@ -706,6 +720,7 @@ export function apply(ctx: Context, config: Config): void {
           // Native execs default their working directory to the session's
           // validated cwd so tools run in the session workspace.
           resolveSessionCwd: (sessionId: string | undefined) => sessionCwd(ctx, sessionId),
+          resolveExecProgress: (sessionId: string | undefined) => sessionExecProgress(ctx, sessionId),
         })
         adapters.set('cursor', adapter)
         handles.set('cursor', ctx.llm.registerAdapter(['cursor'], adapter))
