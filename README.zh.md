@@ -154,7 +154,7 @@ pnpm test      # 编译后跑 node --test 单测
 - `src/auth/` —— PKCE/JWT 工具、token 存储、OAuth 流程引擎（临时本地回调服务）、Claude Code 凭据读取器（Keychain/文件）、`/subscriptions-auth` RPC 通道
 - `src/providers/` —— 各 provider 的 OAuth 常量/换发/刷新 + `LlmAdapter` 实现（Codex、Claude、Grok、Gemini、Cursor）
 - `src/providers/cursor-proto/` —— Cursor AgentService / AiService protobuf 定义与编解码运行时
-- `src/translate/` —— dsh `Message[]` 与 OpenAI Responses / Anthropic Messages / Gemini (Cloud Code Assist) / Cursor 格式互转，SSE 与 HTTP/2 Connect 流解析
+- `src/translate/` —— dsh `Message[]` 与 OpenAI Responses / Anthropic Messages / Gemini (Cloud Code Assist) / Cursor 格式互转，SSE 与 HTTP/2 Connect 流解析。Cursor 本地执行的 Grep/Read/Write/Edit/Bash 会同步打成对话里的工具卡片，避免长时间空白等待。
 - `src/tools/` —— `x_search`、`image_generate` 与 `video_generate`
 - `src/client/` —— 设置 → 订阅页面及速度切换开关（浏览器面，中英文，跟随明暗主题）
 

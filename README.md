@@ -153,6 +153,6 @@ After `pnpm build`, restart `dsh web` to pick up changes.
 - `src/auth/` — PKCE/JWT helpers, token store, OAuth flow engine (temp loopback callback server), Claude Code credential reader (Keychain/file), `/subscriptions-auth` RPC channel
 - `src/providers/` — per-provider OAuth constants/exchange/refresh + `LlmAdapter` implementations (Codex, Claude, Grok, Gemini, Cursor)
 - `src/providers/cursor-proto/` — Cursor AgentService / AiService protobuf definitions and encode/decode runtime
-- `src/translate/` — dsh `Message[]` ⟷ OpenAI Responses / Anthropic Messages / Gemini (Cloud Code Assist) / Cursor wire formats, SSE and HTTP/2 Connect stream parsers
+- `src/translate/` — dsh `Message[]` ⟷ OpenAI Responses / Anthropic Messages / Gemini (Cloud Code Assist) / Cursor wire formats, SSE and HTTP/2 Connect stream parsers. Cursor native execs (Grep/Read/Write/Edit/Bash) are also logged as live harness tool cards while the cloud agent runs.
 - `src/tools/` — `x_search`, `image_generate`, and `video_generate`
 - `src/client/` — the Settings → Subscriptions page & speed toggle (browser half, zh/en, theme-token aware)
