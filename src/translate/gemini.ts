@@ -159,24 +159,91 @@ export function toGeminiContents(
 }
 
 /**
- * Gemini rejects empty strings in JSON Schema `enum` lists
- * (`cannot be empty` on `function_declarations[].parameters…enum[n]`).
- * Task-board tools use `""` to mean “clear to session default”; dropping
- * that sentinel keeps the rest of the enum and lets the model omit the
- * field instead.
+ * JSON Schema keywords Gemini's function-declaration `Schema` proto does not
+ * have. MCP tools commonly send these (TestHub's `$schema` +
+ * `additionalProperties: false`); protojson then 400s the whole request with
+ * `Unknown name "$schema" … Cannot find field`.
+ */
+const GEMINI_SCHEMA_DROP = new Set([
+  '$schema',
+  '$id',
+  '$ref',
+  '$defs',
+  '$comment',
+  '$dynamicRef',
+  '$dynamicAnchor',
+  'additionalProperties',
+  'additionalItems',
+  'exclusiveMinimum',
+  'exclusiveMaximum',
+  'deprecated',
+  'readOnly',
+  'writeOnly',
+  'examples',
+  'default',
+  'const',
+  'oneOf',
+  'allOf',
+  'not',
+  'if',
+  'then',
+  'else',
+  'prefixItems',
+  'unevaluatedProperties',
+  'unevaluatedItems',
+  'patternProperties',
+  'propertyNames',
+  'dependencies',
+  'dependentSchemas',
+  'dependentRequired',
+  'contentMediaType',
+  'contentEncoding',
+])
+
+/**
+ * Gemini's `parameters` field is a proto Schema, not full JSON Schema.
+ * Recursively: drop unknown keywords, collapse `type` unions (`["string",
+ * "null"]` → `string` + `nullable`, otherwise protojson reports `Proto field
+ * is not repeating, cannot start list`), collapse tuple `items` arrays to a
+ * single Schema, and strip empty `enum` sentinels (`cannot be empty`).
+ * Task-board tools use `""` to mean "clear to session default"; dropping
+ * that sentinel keeps the rest of the enum and lets the model omit the field
+ * instead.
  */
 function sanitizeGeminiSchema(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sanitizeGeminiSchema)
   if (typeof value !== 'object' || value === null) return value
+  const input = value as Record<string, unknown>
   const out: Record<string, unknown> = {}
-  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+  for (const [key, child] of Object.entries(input)) {
+    if (key === 'type' || key === 'nullable') continue
+    if (GEMINI_SCHEMA_DROP.has(key) || key.startsWith('$')) continue
     if (key === 'enum' && Array.isArray(child)) {
       const filtered = child.filter(item => item !== '')
       if (filtered.length > 0) out.enum = filtered.map(sanitizeGeminiSchema)
       continue
     }
+    if (key === 'items' && Array.isArray(child)) {
+      // Gemini Schema.items is a singular message, not a repeated field.
+      out.items = sanitizeGeminiSchema(child[0] ?? {})
+      continue
+    }
     out[key] = sanitizeGeminiSchema(child)
   }
+  let nullable = input.nullable === true
+  if (Array.isArray(input.type)) {
+    const types = input.type.filter((item): item is string => typeof item === 'string' && item !== 'null')
+    out.type = types[0] ?? 'string'
+    if (input.type.includes('null')) nullable = true
+  } else if (typeof input.type === 'string') {
+    if (input.type === 'null') {
+      out.type = 'string'
+      nullable = true
+    } else {
+      out.type = input.type
+    }
+  }
+  if (nullable) out.nullable = true
   return out
 }
 

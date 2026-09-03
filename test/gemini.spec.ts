@@ -245,6 +245,41 @@ test('toGeminiTools strips empty enum sentinels Gemini rejects', () => {
   assert.equal(parameters.properties.permission.enum.includes(''), true)
 })
 
+test('toGeminiTools strips $schema and collapses type unions Gemini rejects', () => {
+  const parameters = {
+    $schema: 'http://json-schema.org/draft-07/schema#',
+    type: 'object',
+    additionalProperties: false,
+    exclusiveMinimum: 0,
+    default: {},
+    properties: {
+      categoryId: { type: ['string', 'null'] },
+      parentId: { type: ['string', 'null'], description: 'target parent' },
+      title: { type: 'string' },
+      tags: { type: 'array', items: [{ type: 'string' }, { type: 'number' }] },
+    },
+    required: ['title'],
+  }
+  const mapped = toGeminiTools([{ name: 'create_case', description: 'create a case', parameters }])
+  const decls = mapped[0]?.functionDeclarations as Array<{ parameters: Record<string, unknown> }>
+  const sanitized = decls[0].parameters
+  assert.equal('$schema' in sanitized, false)
+  assert.equal('additionalProperties' in sanitized, false)
+  assert.equal('exclusiveMinimum' in sanitized, false)
+  assert.equal('default' in sanitized, false)
+  assert.deepEqual(sanitized.properties, {
+    categoryId: { type: 'string', nullable: true },
+    parentId: { type: 'string', nullable: true, description: 'target parent' },
+    title: { type: 'string' },
+    tags: { type: 'array', items: { type: 'string' } },
+  })
+  assert.deepEqual(sanitized.required, ['title'])
+  assert.equal(sanitized.type, 'object')
+  // Original harness schema is left unchanged for other providers.
+  assert.equal(parameters.$schema, 'http://json-schema.org/draft-07/schema#')
+  assert.deepEqual(parameters.properties.categoryId.type, ['string', 'null'])
+})
+
 /** Feed every event through a translator, then the terminal finish; flatten the chunks. */
 function drainGemini(events: GeminiStreamEvent[]): StreamChunk[] {
   const translator = new GeminiStreamTranslator()
