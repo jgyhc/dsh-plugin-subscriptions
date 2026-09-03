@@ -6,7 +6,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { CallId, LlmError, MessageId } from '@deepseek-ai/dsh-llm'
+import { LlmError, MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, Message, MessageSource, StreamChunk } from '@deepseek-ai/dsh-llm'
 import {
   ResponsesStreamTranslator,
@@ -39,13 +39,13 @@ function message(
 }
 
 function toolCall(id: string, name: string, args: string): ContentBlock {
-  return { type: 'tool-call', id: CallId(id), name, arguments: args }
+  return { type: 'tool-call', id: ToolCallId(id), name, arguments: args }
 }
 
 function toolResult(callId: string, text: string, isError?: boolean): ContentBlock {
   return {
     type: 'tool-result',
-    toolCallId: CallId(callId),
+    toolCallId: ToolCallId(callId),
     content: [{ type: 'text', text }],
     ...isError === undefined ? {} : { isError },
   }
@@ -63,7 +63,7 @@ test('toResponsesInput: text, tool call, and tool result round trip', () => {
       { type: 'text', text: 'running ls' },
       toolCall('call-1', 'bash', '{"cmd":"ls"}'),
     ]),
-    message('user', [toolResult('call-1', 'file-a\nfile-b')], { kind: 'tool', callId: CallId('call-1') }),
+    message('user', [toolResult('call-1', 'file-a\nfile-b')], { kind: 'tool', callId: ToolCallId('call-1') }),
   ], 'be helpful')
 
   assert.equal(instructions, 'be helpful')

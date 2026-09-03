@@ -6,7 +6,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { CallId, LlmError } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, LlmError } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { OAuthEndpointError } from '../src/providers/common.js'
 import type { TranslatableMessage } from '../src/translate/resolved.js'
@@ -83,18 +83,18 @@ test('toGeminiContents: text, tool call, tool result, and consecutive-role mergi
       { type: 'text', text: 'second' },
       {
         type: 'tool-result',
-        toolCallId: CallId('call-1'),
+        toolCallId: ToolCallId('call-1'),
         toolName: undefined as never, // not a harness field; name comes from the call turn
         content: [{ type: 'text', text: 'ok' }],
       } as never,
     ]),
     msg('assistant', [
       { type: 'text', text: 'calling' },
-      { type: 'tool-call', id: CallId('call-1'), name: 'bash', arguments: '{"cmd":"ls"}' },
+      { type: 'tool-call', id: ToolCallId('call-1'), name: 'bash', arguments: '{"cmd":"ls"}' },
     ]),
     msg('user', [{
       type: 'tool-result',
-      toolCallId: CallId('call-1'),
+      toolCallId: ToolCallId('call-1'),
       content: [{ type: 'text', text: 'file-a' }],
     } as never]),
   ])
@@ -123,10 +123,10 @@ test('toGeminiContents: text, tool call, tool result, and consecutive-role mergi
 
 test('toGeminiContents: tool names follow their calls across turns and errors map to response.error', () => {
   const contents = toGeminiContents([
-    msg('assistant', [{ type: 'tool-call', id: CallId('c2'), name: 'grep', arguments: '{"q":"x"}' } as never]),
+    msg('assistant', [{ type: 'tool-call', id: ToolCallId('c2'), name: 'grep', arguments: '{"q":"x"}' } as never]),
     msg('user', [{
       type: 'tool-result',
-      toolCallId: CallId('c2'),
+      toolCallId: ToolCallId('c2'),
       content: [{ type: 'text', text: 'boom' }],
       isError: true,
     } as never]),
@@ -146,7 +146,7 @@ test('toGeminiContents: resolved images become inlineData parts; malformed args 
       { type: 'image', mediaType: 'image/png', dataBase64: 'aGk=' } as never,
       { type: 'text', text: 'what is this?' },
     ]),
-    msg('assistant', [{ type: 'tool-call', id: CallId('c'), name: 'n', arguments: '{bad' } as never]),
+    msg('assistant', [{ type: 'tool-call', id: ToolCallId('c'), name: 'n', arguments: '{bad' } as never]),
   ])
   assert.deepEqual(contents, [
     {
@@ -183,9 +183,9 @@ test('thought signatures: captured on the stream, echoed on the next request', (
   // calls get the skip sentinel, and functionResponse parts carry no signature.
   const contents = toGeminiContents(
     [
-      msg('assistant', [{ type: 'tool-call', id: CallId('call-9'), name: 'bash', arguments: '{"cmd":"ls"}' } as never]),
-      msg('user', [{ type: 'tool-result', toolCallId: CallId('call-9'), content: [{ type: 'text', text: 'ok' }] } as never]),
-      msg('assistant', [{ type: 'tool-call', id: CallId('call-10'), name: 'grep', arguments: '{"q":"x"}' } as never]),
+      msg('assistant', [{ type: 'tool-call', id: ToolCallId('call-9'), name: 'bash', arguments: '{"cmd":"ls"}' } as never]),
+      msg('user', [{ type: 'tool-result', toolCallId: ToolCallId('call-9'), content: [{ type: 'text', text: 'ok' }] } as never]),
+      msg('assistant', [{ type: 'tool-call', id: ToolCallId('call-10'), name: 'grep', arguments: '{"q":"x"}' } as never]),
     ],
     { signatures, sessionId: 'sess-1' },
   )

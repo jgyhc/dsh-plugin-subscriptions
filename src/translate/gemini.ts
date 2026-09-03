@@ -12,13 +12,13 @@
  */
 
 import {
-  CallId,
   CONTEXT_WINDOW_EXCEEDED_CODE,
   EMPTY_RESPONSE_CODE,
   isContextWindowExceededError,
   isQuotaExceededError,
   LlmError,
   QUOTA_EXCEEDED_CODE,
+  ToolCallId,
 } from '@deepseek-ai/dsh-llm'
 import type {
   ContentBlock,
@@ -283,7 +283,7 @@ function closeBlock(block: OpenBlock): ContentBlock {
     case 'tool-call':
       return {
         type: 'tool-call',
-        id: CallId(block.callId),
+        id: ToolCallId(block.callId),
         name: block.name ?? '',
         arguments: block.text,
       }
@@ -388,7 +388,7 @@ export class GeminiStreamTranslator {
       chunks.push({
         type: 'tool-call-delta',
         index: block.index,
-        id: CallId(callId),
+        id: ToolCallId(callId),
         ...name === '' ? {} : { name },
         argumentsDelta: argumentsText,
       })

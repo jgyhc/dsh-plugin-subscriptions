@@ -5,7 +5,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 
 import {
   buildCursorRequestContextRules,
@@ -304,7 +304,7 @@ test('buildCursorRunRequest keeps the assistant turn when display-only tool resu
         role: 'user',
         content: [{
           type: 'tool-result',
-          toolCallId: CallId('tc-grep'),
+          toolCallId: ToolCallId('tc-grep'),
           content: [{ type: 'text', text: 'matches' }],
         }],
       },

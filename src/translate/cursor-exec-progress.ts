@@ -10,7 +10,7 @@
  */
 
 import { isAbsolute, relative, sep } from 'node:path'
-import { CallId, createToolResultMessage } from '@deepseek-ai/dsh-llm'
+import { createToolResultMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ExecServerMessage } from '../providers/cursor-proto/cursor-proto.js'
 import { decodeMcpArgs, type NativeExecResult } from './cursor-native-exec.js'
 
@@ -442,7 +442,7 @@ export function createCursorSessionProgress(
           return session.append('tool/call', {
             turn: location.turn,
             step: location.step,
-            callId: CallId(presentation.callId),
+            callId: ToolCallId(presentation.callId),
             name: presentation.name,
             arguments: JSON.stringify(presentation.arguments),
           }).seq
@@ -458,7 +458,7 @@ export function createCursorSessionProgress(
         if (location === undefined) return
         try {
           const message = createToolResultMessage({
-            callId: CallId(callId),
+            callId: ToolCallId(callId),
             content: [{ type: 'text', text }],
             isError,
           })

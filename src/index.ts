@@ -10,7 +10,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { CallId, createUserMessage, errorChain, LlmAdapter } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, errorChain, LlmAdapter, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { AdapterRegistrationHandle, GenerateOptions } from '@deepseek-ai/dsh-llm'
 // Type-only: activates the `ctx.tools` Context merge for the inject block.
 import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
@@ -516,7 +516,7 @@ async function runCursorMcpTool(
   exec: { callId: string; name: string; arguments: Record<string, unknown>; signal: AbortSignal },
 ): Promise<NativeToolOutcome> {
   const result = await tools.execute({
-    callId: CallId(exec.callId),
+    callId: ToolCallId(exec.callId),
     name: exec.name,
     arguments: exec.arguments,
     signal: exec.signal,
