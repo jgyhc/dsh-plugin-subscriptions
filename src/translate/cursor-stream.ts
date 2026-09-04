@@ -422,6 +422,7 @@ function buildNativeExecContext(
   progress: NativeExecProgress | undefined,
   onToolActivity?: () => void,
   fileChanges?: NativeExecContext['fileChanges'],
+  agent?: unknown,
 ): NativeExecContext {
   const executeMcpTool = resolveExecuteMcpTool?.()
   const wrappedProgress: NativeExecProgress | undefined = progress !== undefined
@@ -438,6 +439,7 @@ function buildNativeExecContext(
   return {
     signal: signal ?? new AbortController().signal,
     ...(cwd === undefined ? {} : { cwd }),
+    ...(agent === undefined ? {} : { agent }),
     ...(executeMcpTool === undefined ? {} : { executeMcpTool }),
     ...(wrappedProgress === undefined ? {} : { progress: wrappedProgress }),
     ...(fileChanges === undefined ? {} : { fileChanges }),
@@ -511,6 +513,11 @@ export interface CursorStreamOptions extends BuildCursorRunOptions {
   executeMcpTool?: () => ExecuteMcpTool | undefined
   /** Display-only harness tool-card reporter for native Cursor execs. */
   progress?: NativeExecProgress
+  /**
+   * Live harness Agent for this session. Forwarded into native MCP execs so
+   * agent-scoped tools (`skill`, …) remain visible.
+   */
+  agent?: unknown
 }
 
 const HEARTBEAT_INTERVAL_MS = 5_000
@@ -578,6 +585,7 @@ async function* streamCursorOnce(
       options.onActivity?.()
     },
     fileChanges,
+    options.agent,
   )
   let sawTurnEnded = false
 

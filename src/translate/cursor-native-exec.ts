@@ -105,6 +105,11 @@ export interface NativeToolInput {
   name: string
   arguments: Record<string, unknown>
   signal: AbortSignal
+  /**
+   * Live harness Agent for this session. Agent-scoped tools (`skill`, …)
+   * are invisible to `tools.execute()` when this is omitted.
+   */
+  agent?: unknown
 }
 
 /** The flattened harness tool outcome the plugin can render into an MCP result. */
@@ -141,6 +146,11 @@ export interface NativeExecContext {
    */
   cwd?: string
   executeMcpTool?: ExecuteMcpTool
+  /**
+   * Live harness Agent for this stream's session. Forwarded into MCP
+   * executions so agent-scoped tools remain visible.
+   */
+  agent?: unknown
   /** Optional harness session reporter so the GUI can show live tool cards. */
   progress?: NativeExecProgress
   /**
@@ -976,6 +986,7 @@ export async function execMcp(args: McpArgs, ctx: NativeExecContext): Promise<Na
       name: toolName,
       arguments: decodeMcpArgs(args),
       signal: ctx.signal,
+      ...(ctx.agent === undefined ? {} : { agent: ctx.agent }),
     })
     return {
       message: {

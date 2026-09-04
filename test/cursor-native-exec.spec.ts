@@ -414,6 +414,21 @@ test('execMcp runs the harness executor and renders its content', async () => {
   assert.deepEqual(calls, ['x_search'])
 })
 
+test('execMcp forwards the session agent into the harness executor', async () => {
+  const agent = { id: 'session-1' }
+  let seen: unknown
+  const executeMcpTool: ExecuteMcpTool = async exec => {
+    seen = exec.agent
+    return { isError: false, content: 'ok' }
+  }
+  await execMcp(mcpArgs({ name: 'skill', toolName: 'skill' }), {
+    signal: signal(),
+    executeMcpTool,
+    agent,
+  })
+  assert.equal(seen, agent)
+})
+
 test('execMcp surfaces tool failures as an isError success', async () => {
   const executeMcpTool: ExecuteMcpTool = async () => ({ isError: true, content: 'boom' })
   const result = await execMcp(mcpArgs(), { signal: signal(), executeMcpTool })

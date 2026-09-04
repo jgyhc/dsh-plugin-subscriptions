@@ -61,6 +61,11 @@ export interface CursorAdapterOptions {
    * so native Cursor execs appear as Grep/Read/Write cards in the GUI.
    */
   resolveExecProgress?: (sessionId: string | undefined) => NativeExecProgress | undefined
+  /**
+   * Resolves the live harness Agent for the current session so Cursor MCP
+   * execs can see agent-scoped tools (`skill`, preset-local MCP tools).
+   */
+  resolveSessionAgent?: (sessionId: string | undefined) => unknown
 }
 
 /** Cursor wire adapter: one instance serves the `cursor` provider route. */
@@ -169,6 +174,7 @@ export class CursorAdapter extends LlmAdapter {
     // Default native execs to the session's workspace directory so `pwd`,
     // `ls`, and bare greps land in the session instead of the plugin process.
     const cwd = this.options.resolveSessionCwd?.(options.sessionId)
+    const agent = this.options.resolveSessionAgent?.(options.sessionId)
     yield* streamCursor({
       model: options.model,
       messages,
@@ -182,6 +188,7 @@ export class CursorAdapter extends LlmAdapter {
       ...(this.options.baseUrl === undefined ? {} : { baseUrl: this.options.baseUrl }),
       ...(this.options.executeMcpTool === undefined ? {} : { executeMcpTool: this.options.executeMcpTool }),
       ...(cwd === undefined ? {} : { cwd }),
+      ...(agent === undefined ? {} : { agent }),
       ...(this.options.resolveExecProgress === undefined
         ? {}
         : (() => {

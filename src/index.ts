@@ -10,10 +10,9 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { createUserMessage, errorChain, LlmAdapter, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, errorChain, LlmAdapter } from '@deepseek-ai/dsh-llm'
 import type { AdapterRegistrationHandle, GenerateOptions } from '@deepseek-ai/dsh-llm'
 // Type-only: activates the `ctx.tools` Context merge for the inject block.
-import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-tools'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { OAuthFlowManager, type OAuthAttempt } from './auth/oauth-flow.js'
@@ -96,9 +95,10 @@ import {
   refreshCursor,
 } from './providers/cursor.js'
 import { CursorAdapter } from './providers/cursor-adapter.js'
-import type { ExecuteMcpTool, NativeToolOutcome } from './translate/cursor-native-exec.js'
+import type { ExecuteMcpTool } from './translate/cursor-native-exec.js'
 import { createCursorSessionProgress } from './translate/cursor-exec-progress.js'
 import type { CursorProgressSession } from './translate/cursor-exec-progress.js'
+import { runCursorMcpTool, sessionAgent } from './translate/cursor-mcp.js'
 import { createXSearchTool } from './tools/x-search.js'
 import { createImageGenerateTool } from './tools/image-generate.js'
 import { createVideoGenerateTool, videosDirectory } from './tools/video-generate.js'
@@ -505,29 +505,6 @@ function sessionExecProgress(ctx: Context, sessionId: string | undefined) {
   return createCursorSessionProgress(sessionStore(ctx)?.get(sessionId))
 }
 
-/**
- * Run one Cursor MCP tool call through the harness tool registry. The call
- * honors the same pre-execute/guard/dispatch pipeline as harness-driven tool
- * calls (sandbox, approval, output caps); the flattened text content is what
- * the Cursor agent sees in the `mcpResult`.
- */
-async function runCursorMcpTool(
-  tools: ToolRuntime,
-  exec: { callId: string; name: string; arguments: Record<string, unknown>; signal: AbortSignal },
-): Promise<NativeToolOutcome> {
-  const result = await tools.execute({
-    callId: ToolCallId(exec.callId),
-    name: exec.name,
-    arguments: exec.arguments,
-    signal: exec.signal,
-  })
-  const content = result.content
-    .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
-    .map(block => block.text)
-    .join('\n')
-  return { isError: result.isError, content }
-}
-
 export function apply(ctx: Context, config: Config): void {
   const providers = [...new Set(config.providers ?? [...PROVIDER_IDS])]
   const streamIdleTimeoutMs = config.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS
@@ -721,6 +698,7 @@ export function apply(ctx: Context, config: Config): void {
           // validated cwd so tools run in the session workspace.
           resolveSessionCwd: (sessionId: string | undefined) => sessionCwd(ctx, sessionId),
           resolveExecProgress: (sessionId: string | undefined) => sessionExecProgress(ctx, sessionId),
+          resolveSessionAgent: (sessionId: string | undefined) => sessionAgent(ctx, sessionId),
         })
         adapters.set('cursor', adapter)
         handles.set('cursor', ctx.llm.registerAdapter(['cursor'], adapter))
