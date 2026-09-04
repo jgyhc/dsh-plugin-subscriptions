@@ -694,6 +694,46 @@ test('handleExecServerMessage reports live grep progress to the harness session'
   assert.match(String(contentText), /alpha/)
 })
 
+test('handleExecServerMessage supports real session with snapshotEvents and handles undefined events', async () => {
+  const events: Array<{ type: string; data?: { turn?: number; step?: number } }> = [
+    { type: 'turn/start', data: { turn: 2 } },
+    { type: 'step/start', data: { turn: 2, step: 1 } },
+  ]
+  const appended: Array<{ type: string; data: Record<string, unknown> }> = []
+  // Real DSH Session has snapshotEvents() and no events array
+  const sessionWithSnapshot = {
+    snapshotEvents() {
+      return events
+    },
+    append(type: string, data: unknown) {
+      const event = { type, data: data as { turn?: number; step?: number } }
+      events.push(event)
+      appended.push({ type, data: data as Record<string, unknown> })
+      return { seq: events.length - 1 }
+    },
+  }
+  const progress1 = createCursorSessionProgress(sessionWithSnapshot)
+  assert.ok(progress1)
+  const startSeq1 = await progress1.start({ callId: 'c1', name: 'read', arguments: {} })
+  assert.equal(typeof startSeq1, 'number')
+  progress1.finish('c1', Promise.resolve(startSeq1), 'done', false)
+  await waitFor(() => appended.some(e => e.type === 'tool/result'))
+
+  // Session with no events or snapshotEvents (should gracefully return undefined and not throw)
+  const emptySession = {
+    append(type: string, data: unknown) {
+      return { seq: 0 }
+    },
+  }
+  const progress2 = createCursorSessionProgress(emptySession)
+  assert.ok(progress2)
+  const startSeq2 = await progress2.start({ callId: 'c2', name: 'read', arguments: {} })
+  assert.equal(startSeq2, undefined)
+  assert.doesNotThrow(() => {
+    progress2.finish('c2', Promise.resolve(undefined), 'done', false)
+  })
+})
+
 test('cursorExecOutcome extracts human-readable text from McpSuccess with nested content', () => {
   const mcpSuccessValue = {
     $typeName: 'agent.v1.McpSuccess',

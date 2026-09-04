@@ -105,7 +105,8 @@ export interface CursorExecPresentation {
 
 /** Optional harness session used only to append display-only tool events. */
 export interface CursorProgressSession {
-  readonly events: readonly { type: string; data?: { turn?: number; step?: number } }[]
+  readonly events?: readonly { type: string; data?: { turn?: number; step?: number } }[]
+  snapshotEvents?: (from?: number, to?: number) => readonly { type: string; data?: { turn?: number; step?: number } }[]
   append(
     type: string,
     data: unknown,
@@ -408,9 +409,26 @@ export function cursorExecOutcome(result: NativeExecResult): { text: string; isE
   return { text: result.message.case, isError }
 }
 
+function getSessionEvents(
+  session: CursorProgressSession,
+): readonly { type: string; data?: { turn?: number; step?: number } }[] {
+  if (typeof session.snapshotEvents === 'function') {
+    try {
+      return session.snapshotEvents()
+    } catch {
+      return []
+    }
+  }
+  if (Array.isArray(session.events)) {
+    return session.events
+  }
+  return []
+}
+
 function openTurnStep(
-  events: readonly { type: string; data?: { turn?: number; step?: number } }[],
+  events: readonly { type: string; data?: { turn?: number; step?: number } }[] | undefined,
 ): { turn: number; step: number } | undefined {
+  if (!events || !Array.isArray(events)) return undefined
   for (let i = events.length - 1; i >= 0; i--) {
     const event = events[i]
     if (event === undefined) continue
@@ -436,9 +454,10 @@ export function createCursorSessionProgress(
   return {
     start(presentation) {
       return Promise.resolve().then(() => {
-        const location = openTurnStep(session.events)
-        if (location === undefined) return undefined
         try {
+          const events = getSessionEvents(session)
+          const location = openTurnStep(events)
+          if (location === undefined) return undefined
           return session.append('tool/call', {
             turn: location.turn,
             step: location.step,
@@ -454,9 +473,10 @@ export function createCursorSessionProgress(
     finish(callId, started, text, isError) {
       void started.then(callSeq => {
         if (callSeq === undefined) return
-        const location = openTurnStep(session.events)
-        if (location === undefined) return
         try {
+          const events = getSessionEvents(session)
+          const location = openTurnStep(events)
+          if (location === undefined) return
           const message = createToolResultMessage({
             callId: ToolCallId(callId),
             content: [{ type: 'text', text }],
@@ -473,6 +493,8 @@ export function createCursorSessionProgress(
         } catch {
           // Display-only: never fail the Cursor exec correlation.
         }
+      }).catch(() => {
+        // Display-only: never fail the Cursor exec correlation.
       })
     },
   }
